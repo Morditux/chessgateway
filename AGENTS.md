@@ -1,61 +1,58 @@
 # AGENTS.md
 
-## Projet
+## Project
 
-ChessGateway est une passerelle TCP/TLS en Go entre des clients d’échecs et
-des processus moteurs UCI. Le paquet racine s’appelle `gateway`; le point
-d’entrée CLI est `cmd/chessgateway`.
+ChessGateway is a Go TCP/TLS gateway between chess clients and UCI engine
+processes. The root package is named `gateway`; the CLI entry point is
+`cmd/chessgateway`.
 
-## Invariants à préserver
+## Invariants to preserve
 
-- Le transport est JSON Lines, versionné par `chessgateway/1`.
-- Une connexion cliente possède au plus un moteur et un moteur n’est jamais
-  partagé entre connexions.
-- Le champ `uci.command` est relayé comme texte UCI, avec uniquement le
-  séparateur de ligne de transport ajouté. Ne pas introduire de parseur UCI
-  restrictif : les extensions propriétaires doivent fonctionner.
-- Les exécutables et arguments viennent exclusivement de `Config.Engines`.
-  Ne jamais construire une ligne shell à partir d’une entrée réseau et ne pas
-  utiliser `sh -c`.
-- stdout du moteur est le flux UCI client ; stderr doit être drainé pour éviter
-  un blocage mais reste dans les logs.
-- Toute écriture vers un client doit passer par le verrou d’écriture de la
-  connexion. Toute modification de l’état d’une session doit être protégée par
-  son mutex.
-- Un changement de moteur arrête d’abord l’ancien processus. Une déconnexion et
-  un arrêt de serveur doivent libérer les processus moteurs.
+- The transport is JSON Lines, versioned by `chessgateway/1`.
+- A client connection owns at most one engine and an engine is never shared
+  between connections.
+- The `uci.command` field is relayed as UCI text, with only the transport line
+  separator added. Do not introduce a restrictive UCI parser: proprietary
+  extensions must keep working.
+- Executables and arguments come exclusively from `Config.Engines`. Never
+  build a shell line from network input and never use `sh -c`.
+- The engine's stdout is the client UCI stream; stderr must be drained to
+  avoid blocking but stays in the logs.
+- Any write to a client must go through the connection's write lock. Any
+  modification of a session's state must be protected by its mutex.
+- An engine change stops the old process first. A disconnect and a server
+  shutdown must release the engine processes.
 
-## Protocole
+## Protocol
 
-La spécification utilisateur et les exemples normatifs sont dans `README.md`.
-Tout changement de trame doit mettre à jour README et les tests d’intégration.
-Les erreurs de protocole doivent rester structurées (`type=error`, `code`,
-`message`) et ne doivent pas divulguer les chemins d’exécutables.
+The user specification and normative examples are in `README.md`. Any frame
+change must update the README and the integration tests. Protocol errors must
+stay structured (`type=error`, `code`, `message`) and must not leak executable
+paths.
 
-## Sécurité
+## Security
 
-- Valider toutes les données réseau et borner les lignes avant de les décoder.
-- Utiliser `exec.Command` avec des arguments séparés ; jamais d’interpolation
-  shell.
-- Conserver les valeurs par défaut sûres : écoute locale, limite de clients,
-  limite de ligne, délai d’arrêt et délai de connexion initiale.
-- TLS protège le transport mais n’est pas une authentification client. Ne pas
-  présenter cette passerelle comme sécurisée pour Internet sans contrôle
-  d’identité en amont.
-- Ne pas logger les commandes ou données de jeu si cela peut exposer des
-  informations client ; stderr moteur est déjà traité comme donnée non fiable.
+- Validate all network data and bound lines before decoding them.
+- Use `exec.Command` with separate arguments; never shell interpolation.
+- Keep the safe defaults: local listen address, client limit, line limit,
+  shutdown timeout and initial connection timeout.
+- TLS protects the transport but is not client authentication. Do not present
+  this gateway as safe for the Internet without identity verification
+  upstream.
+- Do not log commands or game data if that could expose client information;
+  engine stderr is already treated as untrusted data.
 
-## Vérification
+## Verification
 
-Avant de livrer une modification :
+Before shipping a change:
 
 ```sh
-gofmt -w <fichiers-go-modifiés>
+gofmt -w <modified-go-files>
 GOCACHE=/tmp/chessgateway-gocache go test ./...
 GOCACHE=/tmp/chessgateway-gocache go test -race ./...
 go vet ./...
 ```
 
-Ajouter un test quand une nouvelle trame, une transition de session, une limite
-ou un chemin concurrent est introduit. Préserver les changements existants du
-dépôt et ne pas utiliser de commande destructive sans demande explicite.
+Add a test when a new frame, session transition, limit or concurrent path is
+introduced. Preserve the repository's existing changes and do not use
+destructive commands without an explicit request.

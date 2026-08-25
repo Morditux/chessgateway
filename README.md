@@ -1,29 +1,29 @@
 # ChessGateway
 
-ChessGateway est une passerelle TCP en Go entre une IHM d’échecs et un ou
-plusieurs moteurs compatibles UCI. Chaque connexion cliente possède son propre
-processus moteur : plusieurs joueurs peuvent donc calculer en parallèle sans
-partager l’état UCI (`position`, options, recherche, etc.).
+ChessGateway is a TCP gateway in Go between a chess GUI and one or more UCI
+compatible engines. Each client connection owns its own engine process: several
+players can therefore search in parallel without sharing UCI state (`position`,
+options, search, etc.).
 
-Le serveur ne choisit jamais un exécutable fourni par le client. Les moteurs
-autorisés, leur nom, leur version, leur commande et leurs arguments sont définis
-dans la configuration du serveur.
+The server never chooses an executable provided by the client. The allowed
+engines, their name, version, command and arguments are defined in the server
+configuration.
 
-## Démarrage
+## Getting started
 
-Prérequis : Go 1.27 ou ultérieur et un moteur UCI installé sur la machine
-serveur, par exemple Stockfish.
+Prerequisites: Go 1.27 or later and a UCI engine installed on the server
+machine, for example Stockfish.
 
 ```sh
 cp config.example.json config.json
-# Adapter engines[0].command à l’installation locale.
+# Adjust engines[0].command to your local installation.
 go build -o chessgateway ./cmd/chessgateway
 ./chessgateway -config config.json
 ```
 
-Par défaut, l’écoute se fait sur `127.0.0.1:9000`. Pour un déploiement distant,
-configurer explicitement l’adresse souhaitée et utiliser TLS ou un tunnel
-authentifié. Le protocole n’intègre pas d’authentification applicative.
+By default, it listens on `127.0.0.1:9000`. For remote deployment, explicitly
+configure the desired address and use TLS or an authenticated tunnel. The
+protocol does not include application-level authentication.
 
 ### Configuration
 
@@ -49,63 +49,62 @@ authentifié. Le protocole n’intègre pas d’authentification applicative.
 }
 ```
 
-`tls` est optionnel, mais `cert_file` et `key_file` doivent être fournis
-ensemble. `command` et `args` sont transmis directement à `os/exec`; ils ne
-sont pas exécutés via `sh -c`. Les identifiants sont les clés stables utilisées
-par les clients.
+`tls` is optional, but `cert_file` and `key_file` must be provided together.
+`command` and `args` are passed directly to `os/exec`; they are not executed via
+`sh -c`. The ids are the stable keys used by clients.
 
-## Protocole `chessgateway/1`
+## `chessgateway/1` protocol
 
-Le transport est une connexion TCP (ou TLS) persistante en **JSON Lines** : un
-objet JSON par ligne UTF-8, terminé par `LF` ou `CRLF`. Les réponses et les
-événements du moteur utilisent le même format. La taille maximale par ligne est
-configurable (`max_line_bytes`, 1 MiB par défaut).
+The transport is a persistent TCP (or TLS) connection using **JSON Lines**: one
+JSON object per UTF-8 line, terminated by `LF` or `CRLF`. Responses and engine
+events use the same format. The maximum line size is configurable
+(`max_line_bytes`, 1 MiB by default).
 
-À la connexion, le serveur envoie :
+On connection, the server sends:
 
 ```json
 {"type":"hello","protocol":"chessgateway/1","features":["engine_list","engine_selection","engine_stop","uci_stream"]}
 ```
 
-`request_id` est facultatif et opaque. Lorsqu’il est fourni, le serveur le
-recopie dans la réponse synchrone associée ou dans une erreur. Les événements
-`uci_output` ne portent pas de `request_id`, car une recherche peut produire
-des lignes après plusieurs commandes successives.
+`request_id` is optional and opaque. When provided, the server copies it into
+the associated synchronous response or into an error. `uci_output` events do not
+carry a `request_id`, because a search can produce lines after several
+successive commands.
 
-### Lister les moteurs
+### Listing engines
 
-Requête :
+Request:
 
 ```json
 {"type":"list_engines","request_id":"r1"}
 ```
 
-Réponse :
+Response:
 
 ```json
 {"type":"engines","request_id":"r1","engines":[{"id":"stockfish-17","name":"Stockfish","version":"17"}]}
 ```
 
-Seuls `id`, `name` et `version` sont exposés ; le chemin de l’exécutable et ses
-arguments restent côté serveur.
+Only `id`, `name` and `version` are exposed; the executable path and its
+arguments stay on the server side.
 
-### Sélectionner un moteur
+### Selecting an engine
 
 ```json
 {"type":"select_engine","request_id":"r2","engine_id":"stockfish-17"}
 ```
 
-Le serveur arrête le moteur actuellement attaché à cette connexion, démarre le
-moteur demandé et répond :
+The server stops the engine currently attached to this connection, starts the
+requested engine and replies:
 
 ```json
 {"type":"engine_selected","request_id":"r2","engine_id":"stockfish-17","engine":{"id":"stockfish-17","name":"Stockfish","version":"17"}}
 ```
 
-La sélection ne lance pas automatiquement `uci` : le client garde le contrôle
-du dialogue UCI et doit envoyer lui-même l’initialisation.
+Selection does not automatically run `uci`: the client keeps control of the UCI
+dialogue and must send the initialization itself.
 
-### Transmettre une commande UCI
+### Forwarding a UCI command
 
 ```json
 {"type":"uci","request_id":"r3","command":"uci"}
@@ -115,81 +114,80 @@ du dialogue UCI et doit envoyer lui-même l’initialisation.
 {"type":"uci","command":"go wtime 300000 btime 300000 winc 2000 binc 2000"}
 ```
 
-La valeur de `command` est transmise telle quelle au moteur avec un seul
-`LF` de transport ajouté. Le serveur ne réduit pas l’UCI à une liste de
-commandes connue : les commandes standard et les extensions propres au moteur
-sont donc disponibles, notamment :
+The `command` value is forwarded to the engine as is with a single transport
+`LF` appended. The server does not restrict UCI to a known list of commands:
+standard commands and engine-specific extensions are therefore available,
+notably:
 
-- initialisation : `uci`, `debug`, `isready`, `setoption`, `register`,
-  `ucinewgame` ;
-- position : `position startpos ...` et `position fen ...` ;
-- recherche : `go` avec `searchmoves`, `ponder`, `wtime`, `btime`, `winc`,
-  `binc`, `movestogo`, `depth`, `nodes`, `mate`, `movetime`, `infinite` ;
-- contrôle : `stop`, `ponderhit`, `quit` ;
-- toute commande d’extension acceptée par le moteur.
+- initialization: `uci`, `debug`, `isready`, `setoption`, `register`,
+  `ucinewgame`;
+- position: `position startpos ...` and `position fen ...`;
+- search: `go` with `searchmoves`, `ponder`, `wtime`, `btime`, `winc`, `binc`,
+  `movestogo`, `depth`, `nodes`, `mate`, `movetime`, `infinite`;
+- control: `stop`, `ponderhit`, `quit`;
+- any extension command accepted by the engine.
 
-Chaque ligne stdout du moteur devient un événement :
+Each engine stdout line becomes an event:
 
 ```json
 {"type":"uci_output","engine_id":"stockfish-17","line":"id name Stockfish 17"}
 {"type":"uci_output","engine_id":"stockfish-17","line":"uciok"}
 ```
 
-Les lignes arrivent de façon asynchrone et dans l’ordre de stdout du moteur.
-Stderr est drainé et envoyé dans les logs du serveur, jamais au client. Une
-commande UCI ne produit pas d’accusé de réception supplémentaire : l’absence
-d’erreur signifie qu’elle a été écrite dans stdin du moteur ; les réponses UCI
-(`uciok`, `readyok`, `bestmove`, etc.) sont les seuls résultats métier.
+Lines arrive asynchronously and in engine stdout order. Stderr is drained and
+sent to the server logs, never to the client. A UCI command does not produce an
+additional acknowledgement: the absence of an error means it was written to the
+engine's stdin; UCI responses (`uciok`, `readyok`, `bestmove`, etc.) are the
+only business results.
 
-### Arrêter un moteur
+### Stopping an engine
 
 ```json
 {"type":"stop_engine","request_id":"r4"}
 ```
 
-Cette opération est un contrôle de session : le serveur envoie `stop` puis
-`quit`, attend au plus `shutdown_timeout_ms`, puis termine le processus s’il ne
-sort pas. Elle répond :
+This operation is a session control: the server sends `stop` then `quit`,
+waits at most `shutdown_timeout_ms`, then terminates the process if it does not
+exit. It replies:
 
 ```json
 {"type":"engine_stopped","request_id":"r4","engine_id":"stockfish-17"}
 ```
 
-Pour arrêter une recherche tout en conservant le moteur sélectionné, utiliser
-la commande UCI `stop`. La commande UCI `quit` est également relayée et libère
-le moteur de la connexion.
+To stop a search while keeping the selected engine, use the UCI command `stop`.
+The UCI command `quit` is also relayed and releases the engine from the
+connection.
 
-À la fermeture de la connexion, le serveur arrête automatiquement le processus
-qui lui est attaché. Une nouvelle sélection remplace toujours l’ancien
-processus.
+On connection close, the server automatically stops the attached process. A new
+selection always replaces the previous process.
 
-### Erreurs
+### Errors
 
-Format commun :
+Common format:
 
 ```json
 {"type":"error","request_id":"r5","code":"no_engine_selected","message":"select an engine before sending UCI commands"}
 ```
 
-Codes principaux : `invalid_json`, `invalid_request`, `line_too_long`,
+Main codes: `invalid_json`, `invalid_request`, `line_too_long`,
 `unknown_request_type`, `unknown_engine`, `engine_start_failed`,
-`no_engine_selected`, `invalid_uci_command`, `engine_command_failed` et
-`server_busy`. Les messages d’erreur d’exécution sont volontairement génériques
-pour ne pas divulguer les chemins ou détails internes du serveur.
+`no_engine_selected`, `invalid_uci_command`, `engine_command_failed` and
+`server_busy`. Runtime error messages are deliberately generic so as not to
+leak paths or internal server details.
 
-## Sécurité et exploitation
+## Security and operations
 
-- La liste blanche des moteurs empêche le client de lancer une commande
-  arbitraire ; aucun shell n’est utilisé.
-- Le nombre de connexions et la taille des trames sont bornés.
-- Le serveur écoute localement par défaut.
-- TLS peut protéger le transport, mais le certificat serveur seul n’authentifie
-  pas les clients. Pour un accès Internet, ajouter une authentification en
-  amont, un tunnel SSH/VPN ou une terminaison TLS avec contrôle d’identité.
-- Chaque client consomme un processus moteur : dimensionner `max_clients` selon
-  les CPU/RAM disponibles et appliquer les limites système adaptées.
+- The engine whitelist prevents the client from launching an arbitrary command;
+  no shell is used.
+- The number of connections and the frame sizes are bounded.
+- The server listens locally by default.
+- TLS can protect the transport, but the server certificate alone does not
+  authenticate clients. For Internet access, add upstream authentication, an
+  SSH/VPN tunnel or TLS termination with identity verification.
+- Each client consumes one engine process: size `max_clients` according to the
+  available CPU/RAM and apply the appropriate system limits.
 
-## Développement
+## Development
 
 ```sh
 GOCACHE=/tmp/chessgateway-gocache go test ./...
@@ -197,7 +195,7 @@ GOCACHE=/tmp/chessgateway-gocache go test -race ./...
 go vet ./...
 ```
 
-Le paquet racine contient le serveur et les primitives testables ; le binaire
-est dans `cmd/chessgateway`.
+The root package contains the server and testable primitives; the binary is in
+`cmd/chessgateway`.
 
-Le projet est distribué sous licence MIT, voir [LICENSE](LICENSE).
+The project is distributed under the MIT license, see [LICENSE](LICENSE).
