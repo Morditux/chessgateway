@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,127 @@ func TestConfigRejectsDuplicateEngineIDs(t *testing.T) {
 	if err := config.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate engine id") {
 		t.Fatalf("Validate() error = %v", err)
 	}
+}
+
+func TestNewServerRejectsInvalidClientsFile(t *testing.T) {
+	config := DefaultConfig()
+	config.Auth = &AuthConfig{Enabled: true, ClientsFile: filepath.Join(t.TempDir(), "absent.config")}
+	if _, err := NewServer(config, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("missing clients file accepted")
+	}
+
+	empty := filepath.Join(t.TempDir(), "clients.config")
+	if err := os.WriteFile(empty, []byte("# nothing here\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config.Auth.ClientsFile = empty
+	if _, err := NewServer(config, log.New(io.Discard, "", 0)); err == nil {
+		t.Fatal("clients file without entries accepted")
+	}
+}
+
+func TestServerRequiresAuthentication(t *testing.T) {
+	t.Setenv("CHESSGATEWAY_HELPER", "1")
+
+	accessKey := "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
+	clientsPath := filepath.Join(t.TempDir(), "clients.config")
+	if err := os.WriteFile(clientsPath, []byte("tester "+accessKey+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config := DefaultConfig()
+	config.MaxLineBytes = 64 << 10
+	config.ShutdownTimeoutMS = 500
+	config.Engines = []EngineConfig{
+		{ID: "test-a", Name: "Test Engine A", Version: "1.0", Command: os.Args[0], Args: []string{"-test.run=TestUCIHelperProcess"}},
+	}
+	config.Auth = &AuthConfig{Enabled: true, ClientsFile: clientsPath}
+	server, err := NewServer(config, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := newPipeListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveErrors := make(chan error, 1)
+	go func() { serveErrors <- server.Serve(ctx, listener) }()
+
+	connection, err := listener.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &testClient{connection: connection, reader: bufio.NewReader(connection)}
+	hello := client.readResponse(t)
+	if hello.Type != "hello" || hello.Protocol != ProtocolName {
+		t.Fatalf("hello = %+v", hello)
+	}
+	hasAccessKeysFeature := false
+	for _, feature := range hello.Features {
+		if feature == "access_keys" {
+			hasAccessKeysFeature = true
+		}
+	}
+	if !hasAccessKeysFeature {
+		t.Fatalf("hello features = %v, want access_keys", hello.Features)
+	}
+
+	// Requests other than authenticate are refused before authentication.
+	client.send(Request{Type: "list_engines", RequestID: "early"})
+	if response := client.readResponse(t); response.Type != "error" || response.Code != "authentication_required" {
+		t.Fatalf("pre-authentication response = %+v", response)
+	}
+
+	// An invalid key is answered once and the connection is closed.
+	client.send(Request{Type: "authenticate", RequestID: "bad", AccessKey: "3d813cbb-47fb-42ba-91df-831e1593ac29"})
+	if response := client.readResponse(t); response.Type != "error" || response.Code != "invalid_access_key" || response.RequestID != "bad" {
+		t.Fatalf("failed authentication response = %+v", response)
+	}
+	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.reader.ReadByte(); err == nil {
+		t.Fatal("connection stayed open after a failed authentication")
+	} else {
+		_ = connection.Close()
+	}
+
+	// A valid key opens the normal session.
+	connection, err = listener.Dial()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client = &testClient{connection: connection, reader: bufio.NewReader(connection)}
+	if hello := client.readResponse(t); hello.Type != "hello" {
+		t.Fatalf("hello = %+v", hello)
+	}
+	client.send(Request{Type: "authenticate", RequestID: "ok", AccessKey: strings.ToUpper(accessKey)})
+	if response := client.readResponse(t); response.Type != "authenticated" || response.RequestID != "ok" {
+		t.Fatalf("authentication response = %+v", response)
+	}
+
+	// Re-authenticating an authenticated connection is refused.
+	client.send(Request{Type: "authenticate", RequestID: "again", AccessKey: accessKey})
+	if response := client.readResponse(t); response.Type != "error" || response.Code != "already_authenticated" {
+		t.Fatalf("re-authentication response = %+v", response)
+	}
+
+	client.send(Request{Type: "select_engine", RequestID: "select", EngineID: "test-a"})
+	if response := client.readUntilType(t, "engine_selected"); response.EngineID != "test-a" {
+		t.Fatalf("select response = %+v", response)
+	}
+	client.send(Request{Type: "uci", Command: "isready"})
+	if !client.readUntilLine(t, "readyok") {
+		t.Fatal("authenticated client did not receive readyok")
+	}
+
+	cancel()
+	select {
+	case err := <-serveErrors:
+		if err != nil {
+			t.Fatalf("server error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
+	}
+	_ = client.connection.Close()
 }
 
 func TestServerRelaysIndependentEngineSessions(t *testing.T) {

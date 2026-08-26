@@ -22,8 +22,9 @@ go build -o chessgateway ./cmd/chessgateway
 ```
 
 By default, it listens on `127.0.0.1:9000`. For remote deployment, explicitly
-configure the desired address and use TLS or an authenticated tunnel. The
-protocol does not include application-level authentication.
+configure the desired address and use TLS or an authenticated tunnel.
+Optional application-level client authentication with UUID access keys is
+described in [Client authentication](#client-authentication).
 
 ### Configuration
 
@@ -53,6 +54,35 @@ protocol does not include application-level authentication.
 `command` and `args` are passed directly to `os/exec`; they are not executed via
 `sh -c`. The ids are the stable keys used by clients.
 
+## Client authentication
+
+Authentication is disabled unless an `auth` section enables it:
+
+```json
+{
+  "auth": {
+    "enabled": true,
+    "clients_file": "/etc/chessgateway/clients.config"
+  }
+}
+```
+
+`clients_file` lists the authorized clients, one per line: a name used for
+logging and a unique UUID access key. Empty lines and lines starting with `#`
+are ignored:
+
+```text
+# One client per line: <name> <access-key>
+# Generate a key with: uuidgen
+desktop f81d4fae-7dec-11d0-a765-00a0c91e6bf6
+laptop  06ec1ea5-3b6d-4312-9f2c-8f514a9c37f1
+```
+
+Names accept 1 to 64 ASCII letters, digits, `.`, `_` and `-`; keys must be
+canonical UUIDs (case-insensitive). Each name and each key may appear only
+once and at least one client is required: the server refuses to start when the
+file is missing or invalid. See [`clients.config.example`](clients.config.example).
+
 ## `chessgateway/1` protocol
 
 The transport is a persistent TCP (or TLS) connection using **JSON Lines**: one
@@ -66,10 +96,33 @@ On connection, the server sends:
 {"type":"hello","protocol":"chessgateway/1","features":["engine_list","engine_selection","engine_stop","uci_stream"]}
 ```
 
+`access_keys` is appended to `features` when client authentication is enabled.
+
 `request_id` is optional and opaque. When provided, the server copies it into
 the associated synchronous response or into an error. `uci_output` events do not
 carry a `request_id`, because a search can produce lines after several
 successive commands.
+
+### Authenticating
+
+Required when the hello features contain `access_keys`: the first request must
+then be
+
+```json
+{"type":"authenticate","request_id":"auth","access_key":"f81d4fae-7dec-11d0-a765-00a0c91e6bf6"}
+```
+
+and the server replies
+
+```json
+{"type":"authenticated","request_id":"auth"}
+```
+
+Until authentication succeeds, any other request is refused with the
+`authentication_required` error. An invalid key produces a single
+`invalid_access_key` error and the server closes the connection. Sending
+`authenticate` on an already authenticated connection is refused with
+`already_authenticated`. Keys are compared in constant time and never logged.
 
 ### Listing engines
 
@@ -171,7 +224,8 @@ Common format:
 
 Main codes: `invalid_json`, `invalid_request`, `line_too_long`,
 `unknown_request_type`, `unknown_engine`, `engine_start_failed`,
-`no_engine_selected`, `invalid_uci_command`, `engine_command_failed` and
+`no_engine_selected`, `invalid_uci_command`, `engine_command_failed`,
+`authentication_required`, `invalid_access_key`, `already_authenticated`,
 `server_busy`. Runtime error messages are deliberately generic so as not to
 leak paths or internal server details.
 
@@ -181,6 +235,10 @@ leak paths or internal server details.
   no shell is used.
 - The number of connections and the frame sizes are bounded.
 - The server listens locally by default.
+- Optional access keys authenticate clients at the application level. Treat
+  `clients.config` as secret material and restrict its file permissions; keys
+  are bearer secrets, so combine them with TLS to keep them off the wire in
+  clear.
 - TLS can protect the transport, but the server certificate alone does not
   authenticate clients. For Internet access, add upstream authentication, an
   SSH/VPN tunnel or TLS termination with identity verification.

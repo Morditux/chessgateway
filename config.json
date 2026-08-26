@@ -1,18 +1,14 @@
 {
-  "listen": "127.0.0.1:9000",
+  "listen": "0.0.0.0:9000",
   "max_clients": 64,
   "max_line_bytes": 1048576,
   "shutdown_timeout_ms": 2000,
-  "auth": {
-    "enabled": false,
-    "clients_file": "clients.config"
-  },
   "engines": [
     {
-      "id": "stockfish-17",
+      "id": "stockfish-git",
       "name": "Stockfish",
       "version": "17",
-      "command": "/usr/games/stockfish",
+      "command": "/home/mordicus/chess/Stockfish/src/stockfish",
       "args": []
     }
   ]

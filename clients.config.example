@@ -1,0 +1,8 @@
+# ChessGateway client access keys (used when auth.enabled is true).
+# One client per line: <name> <access-key>
+# Generate a key with: uuidgen
+# Names accept ASCII letters, digits, '.', '_' and '-' (1 to 64 characters).
+# Empty lines and lines starting with # are ignored.
+#
+# Example:
+# desktop-workstation f81d4fae-7dec-11d0-a765-00a0c91e6bf6

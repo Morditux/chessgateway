@@ -26,6 +26,7 @@ type Config struct {
 	MaxLineBytes      int            `json:"max_line_bytes"`
 	ShutdownTimeoutMS int            `json:"shutdown_timeout_ms"`
 	TLS               *TLSConfig     `json:"tls,omitempty"`
+	Auth              *AuthConfig    `json:"auth,omitempty"`
 	Engines           []EngineConfig `json:"engines"`
 }
 
@@ -35,6 +36,13 @@ type Config struct {
 type TLSConfig struct {
 	CertFile string `json:"cert_file"`
 	KeyFile  string `json:"key_file"`
+}
+
+// AuthConfig optionally requires clients to authenticate with the UUID access
+// keys listed in ClientsFile before any other request is accepted.
+type AuthConfig struct {
+	Enabled     bool   `json:"enabled"`
+	ClientsFile string `json:"clients_file"`
 }
 
 // EngineConfig describes an executable that the server administrator allows
@@ -124,6 +132,15 @@ func (c Config) Validate() error {
 		}
 		if strings.ContainsRune(c.TLS.CertFile, 0) || strings.ContainsRune(c.TLS.KeyFile, 0) {
 			return errors.New("tls paths must not contain NUL")
+		}
+	}
+
+	if c.Auth != nil && c.Auth.Enabled {
+		if c.Auth.ClientsFile == "" {
+			return errors.New("auth.enabled requires clients_file")
+		}
+		if strings.ContainsRune(c.Auth.ClientsFile, 0) {
+			return errors.New("auth.clients_file must not contain NUL")
 		}
 	}
 	return nil

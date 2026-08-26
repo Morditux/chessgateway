@@ -20,6 +20,7 @@ type Server struct {
 	logger  *log.Logger
 	clients chan struct{}
 	engines map[string]EngineConfig
+	auth    *accessKeyStore
 }
 
 func NewServer(config Config, logger *log.Logger) (*Server, error) {
@@ -33,11 +34,20 @@ func NewServer(config Config, logger *log.Logger) (*Server, error) {
 	for _, engine := range config.Engines {
 		engines[engine.ID] = engine
 	}
+	var store *accessKeyStore
+	if config.Auth != nil && config.Auth.Enabled {
+		entries, err := loadClientsFile(config.Auth.ClientsFile)
+		if err != nil {
+			return nil, err
+		}
+		store = newAccessKeyStore(entries)
+	}
 	return &Server{
 		config:  config,
 		logger:  logger,
 		clients: make(chan struct{}, config.MaxClients),
 		engines: engines,
+		auth:    store,
 	}, nil
 }
 
@@ -141,10 +151,11 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 type client struct {
-	connection net.Conn
-	writeMu    sync.Mutex
-	session    *engineSession
-	server     *Server
+	connection    net.Conn
+	writeMu       sync.Mutex
+	session       *engineSession
+	server        *Server
+	authenticated bool
 }
 
 func (s *Server) handleClient(connection net.Conn) {
@@ -157,17 +168,23 @@ func (s *Server) handleClient(connection net.Conn) {
 	client.session = newEngineSession(s.config, s.logger, client.engineOutput)
 	// This also bounds a TLS handshake performed lazily by tls.Conn.Write.
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
+	features := []string{"engine_list", "engine_selection", "engine_stop", "uci_stream"}
+	if s.auth != nil {
+		features = append(features, "access_keys")
+	}
 	if err := client.write(Response{
 		Type:     "hello",
 		Protocol: ProtocolName,
-		Features: []string{"engine_list", "engine_selection", "engine_stop", "uci_stream"},
+		Features: features,
 	}); err != nil {
 		return
 	}
 	_ = connection.SetDeadline(time.Time{})
 
 	// A client that never sends its first frame should not occupy a slot
-	// forever. Once the first valid request arrives, UCI searches may be long.
+	// forever. Once the first valid request arrives, UCI searches may be long;
+	// with authentication enabled the deadline is only lifted once the client
+	// has authenticated.
 	_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))
 	defer client.session.stop()
 	reader := bufio.NewReaderSize(connection, 64<<10)
@@ -201,7 +218,9 @@ func (s *Server) handleClient(connection net.Conn) {
 		}
 		if firstRequest {
 			firstRequest = false
-			_ = connection.SetReadDeadline(time.Time{})
+			if s.auth == nil {
+				_ = connection.SetReadDeadline(time.Time{})
+			}
 		}
 		if !client.handleRequest(request) {
 			return
@@ -210,7 +229,13 @@ func (s *Server) handleClient(connection net.Conn) {
 }
 
 func (c *client) handleRequest(request Request) bool {
+	if c.server.auth != nil && !c.authenticated {
+		return c.handleUnauthenticatedRequest(request)
+	}
 	switch request.Type {
+	case "authenticate":
+		return c.writeError(request.RequestID, "already_authenticated", "this connection is already authenticated") == nil
+
 	case "list_engines":
 		engines := make([]EngineInfo, 0, len(c.server.config.Engines))
 		for _, engine := range c.server.config.Engines {
@@ -251,6 +276,25 @@ func (c *client) handleRequest(request Request) bool {
 	default:
 		return c.writeError(request.RequestID, "unknown_request_type", "unsupported request type") == nil
 	}
+}
+
+// handleUnauthenticatedRequest only accepts the authenticate frame. Any other
+// request is refused until the client presents a valid access key; a failed
+// attempt is answered once and the connection is closed to bound guessing.
+func (c *client) handleUnauthenticatedRequest(request Request) bool {
+	if request.Type != "authenticate" {
+		return c.writeError(request.RequestID, "authentication_required", "send an authenticate request with a valid access key") == nil
+	}
+	name, ok := c.server.auth.authenticate(request.AccessKey)
+	if !ok {
+		c.server.logger.Printf("client %s presented an invalid access key", c.connection.RemoteAddr())
+		_ = c.writeError(request.RequestID, "invalid_access_key", "the provided access key is not valid")
+		return false
+	}
+	c.authenticated = true
+	_ = c.connection.SetReadDeadline(time.Time{})
+	c.server.logger.Printf("client %s authenticated as %q", c.connection.RemoteAddr(), name)
+	return c.write(Response{Type: "authenticated", RequestID: request.RequestID}) == nil
 }
 
 func (c *client) engineOutput(engineID, line string) {

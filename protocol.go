@@ -24,6 +24,7 @@ type Request struct {
 	RequestID string `json:"request_id,omitempty"`
 	EngineID  string `json:"engine_id,omitempty"`
 	Command   string `json:"command,omitempty"`
+	AccessKey string `json:"access_key,omitempty"`
 }
 
 // EngineInfo contains the public metadata of a configured engine. The command
