@@ -338,6 +338,118 @@ Security notes:
   `ulimits.nofile=65536` and `stop_grace_period: 30s` (mirroring
   `deploy/chessgateway.service`).
 
+## Gateway client (`gatewayclient`) — UCI frontend
+
+`gatewayclient` se comporte comme un moteur UCI pour une interface graphique (Arena,
+CuteChess, Fritz, etc.) mais relaye les commandes UCI vers `chessgateway` via le
+protocole `chessgateway/1`. Il est utile pour déporter le calcul sur une machine
+distante tout en gardant une GUI locale.
+
+### Construction
+
+```sh
+go build -o gatewayclient ./cmd/gatewayclient
+# ou depuis le dossier client :
+go build -o gatewayclient ./cmd/gatewayclient
+```
+
+### Configuration (`gatewayclient.conf`)
+
+Le binaire lit `gatewayclient.conf` (JSON, même format que le serveur) — voir
+[`gatewayclient.conf.example`](gatewayclient.conf.example) et
+[`client/gatewayclient.conf.example`](client/gatewayclient.conf.example) :
+
+```json
+{
+  "host": "127.0.0.1:9000",
+  "engine_id": "stockfish-17",
+  "access_key": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+  "connect_timeout_ms": 5000,
+  "max_line_bytes": 1048576,
+  "log_file": "",
+  "tls": {
+    "enabled": false,
+    "ca_file": "/etc/chessgateway/ca.crt",
+    "cert_file": "",
+    "key_file": "",
+    "server_name": "",
+    "insecure_skip_verify": false
+  }
+}
+```
+
+- `host` (`host:port`) — adresse du gateway (requis).
+- `engine_id` — id d'un moteur autorisé côté serveur (requis, voir `config.json`).
+- `access_key` — UUID d'authentification si `auth.enabled=true` côté serveur.
+- `connect_timeout_ms` / `max_line_bytes` — bornes réseau (défauts 5 s / 1 MiB).
+- `log_file` — fichier de log (`""` → `stderr`). Contient les événements de
+  connexion ; les commandes UCI y sont journalisées — protégez ce fichier s'il
+  contient des données de parties.
+- `tls.enabled` — active TLS (TLS 1.3). `ca_file` pour un CA privé, `cert_file`/
+  `key_file` pour un client mTLS, `server_name` pour SNI, `insecure_skip_verify`
+  uniquement en test.
+
+Copiez l'exemple et éditez-le :
+
+```sh
+cp gatewayclient.conf.example gatewayclient.conf
+# ou
+cp client/gatewayclient.conf.example client/gatewayclient.conf
+# éditez host, engine_id et access_key
+chmod 600 gatewayclient.conf
+```
+
+La clé `access_key` est une bearer secret : combinez-la avec TLS et des
+permissions `0600`.
+
+### Utilisation comme moteur UCI
+
+1. Déclarez `gatewayclient` comme moteur dans votre GUI :
+   - **Arena** : `Engines → Install New Engine → gatewayclient` (pointez vers le binaire)
+   - **CuteChess** : `cutechess-cli -engine cmd=gatewayclient -engine cmd=stockfish` ou via `Settings → Engines`
+   - **Fritz / ChessBase** : `Engine → Create UCI Engine → gatewayclient.exe`
+
+   Le binaire se comporte exactement comme un moteur UCI : la GUI écrit sur son
+   `stdin` (`uci`, `isready`, `position`, `go`, `stop`, `quit`…) et lit les
+   réponses sur `stdout`.
+
+2. Spécifiez le fichier de configuration :
+   - Par défaut `gatewayclient` cherche `./gatewayclient.conf` puis
+     `./client/gatewayclient.conf`.
+   - Chemin explicite : `gatewayclient -config /path/to/gatewayclient.conf`
+
+3. Exemple de session manuelle :
+
+   ```sh
+   ./gatewayclient -config gatewayclient.conf
+   uci
+   # → id name Stockfish 17
+   # → uciok
+   isready
+   # → readyok
+   position startpos moves e2e4 e7e5
+   go wtime 300000 btime 300000
+   # → info ... / bestmove ...
+   quit
+   ```
+
+Au démarrage, `gatewayclient` se connecte, attend `hello`, s'authentifie si
+`access_keys` est annoncé, sélectionne `engine_id`, puis ponte `stdin` →
+`{"type":"uci","command":...}` et `{"type":"uci_output","line":...}` → `stdout`.
+Aucune ligne shell n'est construite depuis le réseau ; le champ `command` est
+relayé tel quel avec un seul `LF`.
+
+Fermer la GUI ou envoyer `quit` coupe la connexion ; le serveur libère alors le
+processus moteur associé.
+
+### Sécurité
+
+- Ne loguez pas les parties si `log_file` est exposé ; traitez-le comme une
+  donnée sensible.
+- Préférez `tls.enabled=true` avec un CA privé dès que le réseau n'est pas
+  local.
+- Le client ne logue jamais `access_key`.
+
 ## Development
 
 ```sh
@@ -346,7 +458,8 @@ GOCACHE=/tmp/chessgateway-gocache go test -race ./...
 go vet ./...
 ```
 
-The root package contains the server and testable primitives; the binary is in
-`cmd/chessgateway`.
+The root package contains the server and testable primitives; the binaries are in
+`cmd/chessgateway` and `cmd/gatewayclient` (`client/` holds the library and
+config example).
 
 The project is distributed under the MIT license, see [LICENSE](LICENSE).

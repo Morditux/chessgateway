@@ -6,6 +6,8 @@ chessgateway_*.deb
 /tmp
 engines/
 clients.config
+gatewayclient.conf
+client/gatewayclient.conf
 *.key
 *.crt
 certs/

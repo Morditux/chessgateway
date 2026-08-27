@@ -1,0 +1,16 @@
+{
+  "host": "127.0.0.1:9000",
+  "engine_id": "stockfish-17",
+  "access_key": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+  "connect_timeout_ms": 5000,
+  "max_line_bytes": 1048576,
+  "log_file": "",
+  "tls": {
+    "enabled": false,
+    "ca_file": "/etc/chessgateway/ca.crt",
+    "cert_file": "",
+    "key_file": "",
+    "server_name": "",
+    "insecure_skip_verify": false
+  }
+}
