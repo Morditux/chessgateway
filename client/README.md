@@ -1,20 +1,20 @@
-# gatewayclient — client UCI frontend for ChessGateway
+# gatewayclient — UCI frontend for ChessGateway
 
-`gatewayclient` se comporte comme un moteur UCI pour une GUI d'échecs (Arena, CuteChess, Fritz, etc.) mais se connecte à `chessgateway` au lieu de lancer un moteur local.
+`gatewayclient` behaves like a UCI engine for a chess GUI (Arena, CuteChess, Fritz, etc.) but connects to `chessgateway` instead of launching a local engine.
 
 ## Architecture
 
-- `config.go` — chargement et validation de `gatewayclient.conf` (JSON, `DisallowUnknownFields`, 1 MiB max).
-- `client.go` — connexion TCP/TLS, handshake `hello`, authentification `access_keys`, `select_engine`, puis pont bidirectionnel :
+- `config.go` — loading and validation of `gatewayclient.conf` (JSON, `DisallowUnknownFields`, 1 MiB max).
+- `client.go` — TCP/TLS connection, `hello` handshake, `access_keys` authentication, `select_engine`, then bidirectional bridge:
   - GUI `stdin` → `{"type":"uci","command":...}` → gateway
   - gateway `{"type":"uci_output","line":...}` → GUI `stdout`
-- `cmd/gatewayclient/main.go` — binaire `gatewayclient` (flags `-config`, logs, signaux).
+- `cmd/gatewayclient/main.go` — `gatewayclient` binary (flags `-config`, logging, signals).
 
-Le champ `command` est relayé tel quel avec un seul `LF` (pas de parser UCI restrictif, extensions propriétaires intactes). Aucune ligne shell n'est construite depuis le réseau.
+The `command` field is forwarded verbatim with a single `LF` (no restrictive UCI parser, proprietary extensions remain intact). No shell line is built from network data.
 
 ## Configuration
 
-Voir `gatewayclient.conf.example` à la racine et `client/gatewayclient.conf.example` :
+See `gatewayclient.conf.example` at the repository root and `client/gatewayclient.conf.example`:
 
 ```json
 {
@@ -35,42 +35,42 @@ Voir `gatewayclient.conf.example` à la racine et `client/gatewayclient.conf.exa
 }
 ```
 
-| Champ | Description |
+| Field | Description |
 |-------|-------------|
-| `host` | `host:port` du gateway (requis) |
-| `engine_id` | id moteur côté serveur (`config.json` → `engines[].id`) |
-| `access_key` | UUID si `auth.enabled=true` côté serveur |
-| `connect_timeout_ms` | timeout de connexion (1–60000, défaut 5000) |
-| `max_line_bytes` | limite ligne JSON/UCI (1024–16MiB, défaut 1 MiB) |
-| `log_file` | `""` → stderr, sinon fichier (0600 recommandé) |
-| `tls.enabled` | active TLS 1.3 |
-| `tls.ca_file` | CA privé (PEM) |
-| `tls.cert_file`/`key_file` | client mTLS (ensemble) |
-| `tls.server_name` | SNI (défaut : host sans port) |
-| `tls.insecure_skip_verify` | test uniquement |
+| `host` | `host:port` of the gateway (required) |
+| `engine_id` | server-side engine id (`config.json` → `engines[].id`) |
+| `access_key` | UUID when `auth.enabled=true` on the server |
+| `connect_timeout_ms` | connect timeout (1–60000, default 5000) |
+| `max_line_bytes` | JSON/UCI line limit (1024–16MiB, default 1 MiB) |
+| `log_file` | `""` → stderr, otherwise file (0600 recommended) |
+| `tls.enabled` | enable TLS 1.3 |
+| `tls.ca_file` | private CA (PEM) |
+| `tls.cert_file`/`key_file` | mutual TLS client cert (both required) |
+| `tls.server_name` | SNI (default: host without port) |
+| `tls.insecure_skip_verify` | testing only |
 
 ```sh
 cp gatewayclient.conf.example gatewayclient.conf
-# éditer host / engine_id / access_key
+# edit host / engine_id / access_key
 chmod 600 gatewayclient.conf
 ```
 
-Recherche du fichier : `-config` explicite, sinon `./gatewayclient.conf`, sinon `./client/gatewayclient.conf`.
+Config file lookup: explicit `-config` path, otherwise `./gatewayclient.conf`, otherwise `./client/gatewayclient.conf`.
 
-## Construction
+## Build
 
 ```sh
 go build -o gatewayclient ./cmd/gatewayclient
-./gatewayclient -config gatewayclient.conf   # ou client/gatewayclient.conf
+./gatewayclient -config gatewayclient.conf   # or client/gatewayclient.conf
 ```
 
-## Utilisation GUI
+## GUI usage
 
-- **Arena** : `Engines → Install New Engine` → choisir `gatewayclient`
-- **CuteChess GUI/cli** : `cutechess-cli -engine cmd=gatewayclient`
-- **Fritz** : `Engine → Create UCI Engine`
+- **Arena**: `Engines → Install New Engine` → select `gatewayclient`
+- **CuteChess GUI/cli**: `cutechess-cli -engine cmd=gatewayclient`
+- **Fritz**: `Engine → Create UCI Engine`
 
-Test manuel :
+Manual test:
 
 ```sh
 ./gatewayclient -config gatewayclient.conf
@@ -81,16 +81,16 @@ go depth 10
 quit
 ```
 
-## Logs et sécurité
+## Logging and security
 
-- `access_key` n'est jamais loguée.
-- `log_file` peut contenir des commandes `position`/`go` → protéger en `0600`.
-- TLS est recommandé hors réseau local ; `insecure_skip_verify` seulement en labo.
-- En cas d'erreur gateway (`no_engine_selected`, `engine_command_failed`…), le client loggue et relaie `info string gateway error [...]` sur stdout (sans polluer le flux UCI utile).
+- `access_key` is never logged.
+- `log_file` may contain `position`/`go` commands → protect with `0600`.
+- TLS is recommended outside a local network; `insecure_skip_verify` only for labs.
+- On gateway errors (`no_engine_selected`, `engine_command_failed`…), the client logs and forwards `info string gateway error [...]` on stdout (without polluting the useful UCI stream).
 
-## Dépannage
+## Troubleshooting
 
-- `dial gateway: connection refused` → vérifier `host` et que `chessgateway` écoute.
-- `authentication failed [invalid_access_key]` → régénérer `access_key` (`uuidgen`) et vérifier `clients.config` côté serveur.
-- `select_engine failed [unknown_engine]` → `engine_id` doit exister dans `config.json`.
-- `protocol line exceeds configured limit` → augmenter `max_line_bytes` côté client et serveur.
+- `dial gateway: connection refused` → check `host` and that `chessgateway` is listening.
+- `authentication failed [invalid_access_key]` → regenerate `access_key` (`uuidgen`) and check `clients.config` on the server.
+- `select_engine failed [unknown_engine]` → `engine_id` must exist in `config.json`.
+- `protocol line exceeds configured limit` → increase `max_line_bytes` on both client and server.

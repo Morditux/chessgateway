@@ -340,24 +340,24 @@ Security notes:
 
 ## Gateway client (`gatewayclient`) — UCI frontend
 
-`gatewayclient` se comporte comme un moteur UCI pour une interface graphique (Arena,
-CuteChess, Fritz, etc.) mais relaye les commandes UCI vers `chessgateway` via le
-protocole `chessgateway/1`. Il est utile pour déporter le calcul sur une machine
-distante tout en gardant une GUI locale.
+`gatewayclient` behaves like a UCI engine for a chess GUI (Arena, CuteChess,
+Fritz, etc.) but forwards UCI commands to `chessgateway` via the
+`chessgateway/1` protocol. It is useful to offload computation to a remote
+machine while keeping a local GUI.
 
-### Construction
+### Build
 
 ```sh
 go build -o gatewayclient ./cmd/gatewayclient
-# ou depuis le dossier client :
-go build -o gatewayclient ./cmd/gatewayclient
+# or from the client folder:
+go build -o gatewayclient ./client/gatewayclient
 ```
 
 ### Configuration (`gatewayclient.conf`)
 
-Le binaire lit `gatewayclient.conf` (JSON, même format que le serveur) — voir
-[`gatewayclient.conf.example`](gatewayclient.conf.example) et
-[`client/gatewayclient.conf.example`](client/gatewayclient.conf.example) :
+The binary reads `gatewayclient.conf` (JSON, same envelope as the server) — see
+[`gatewayclient.conf.example`](gatewayclient.conf.example) and
+[`client/gatewayclient.conf.example`](client/gatewayclient.conf.example):
 
 ```json
 {
@@ -378,47 +378,45 @@ Le binaire lit `gatewayclient.conf` (JSON, même format que le serveur) — voir
 }
 ```
 
-- `host` (`host:port`) — adresse du gateway (requis).
-- `engine_id` — id d'un moteur autorisé côté serveur (requis, voir `config.json`).
-- `access_key` — UUID d'authentification si `auth.enabled=true` côté serveur.
-- `connect_timeout_ms` / `max_line_bytes` — bornes réseau (défauts 5 s / 1 MiB).
-- `log_file` — fichier de log (`""` → `stderr`). Contient les événements de
-  connexion ; les commandes UCI y sont journalisées — protégez ce fichier s'il
-  contient des données de parties.
-- `tls.enabled` — active TLS (TLS 1.3). `ca_file` pour un CA privé, `cert_file`/
-  `key_file` pour un client mTLS, `server_name` pour SNI, `insecure_skip_verify`
-  uniquement en test.
+- `host` (`host:port`) — gateway address (required).
+- `engine_id` — id of an engine allowed on the server (required, see `config.json`).
+- `access_key` — authentication UUID when `auth.enabled=true` on the server.
+- `connect_timeout_ms` / `max_line_bytes` — network bounds (defaults 5s / 1 MiB).
+- `log_file` — log file (`""` → `stderr`). It contains connection events;
+  UCI commands are logged there — protect the file if it may contain game data.
+- `tls.enabled` — enables TLS (TLS 1.3). `ca_file` for a private CA, `cert_file`/
+  `key_file` for mutual TLS, `server_name` for SNI, `insecure_skip_verify`
+  for testing only.
 
-Copiez l'exemple et éditez-le :
+Copy the example and edit it:
 
 ```sh
 cp gatewayclient.conf.example gatewayclient.conf
-# ou
+# or
 cp client/gatewayclient.conf.example client/gatewayclient.conf
-# éditez host, engine_id et access_key
+# edit host, engine_id and access_key
 chmod 600 gatewayclient.conf
 ```
 
-La clé `access_key` est une bearer secret : combinez-la avec TLS et des
-permissions `0600`.
+`access_key` is a bearer secret: combine it with TLS and `0600` permissions.
 
-### Utilisation comme moteur UCI
+### Usage as a UCI engine
 
-1. Déclarez `gatewayclient` comme moteur dans votre GUI :
-   - **Arena** : `Engines → Install New Engine → gatewayclient` (pointez vers le binaire)
-   - **CuteChess** : `cutechess-cli -engine cmd=gatewayclient -engine cmd=stockfish` ou via `Settings → Engines`
-   - **Fritz / ChessBase** : `Engine → Create UCI Engine → gatewayclient.exe`
+1. Register `gatewayclient` as an engine in your GUI:
+   - **Arena**: `Engines → Install New Engine → gatewayclient` (point to the binary)
+   - **CuteChess**: `cutechess-cli -engine cmd=gatewayclient -engine cmd=stockfish` or `Settings → Engines`
+   - **Fritz / ChessBase**: `Engine → Create UCI Engine → gatewayclient.exe`
 
-   Le binaire se comporte exactement comme un moteur UCI : la GUI écrit sur son
-   `stdin` (`uci`, `isready`, `position`, `go`, `stop`, `quit`…) et lit les
-   réponses sur `stdout`.
+   The binary behaves exactly like a UCI engine: the GUI writes to its
+   `stdin` (`uci`, `isready`, `position`, `go`, `stop`, `quit`…) and reads
+   replies on `stdout`.
 
-2. Spécifiez le fichier de configuration :
-   - Par défaut `gatewayclient` cherche `./gatewayclient.conf` puis
+2. Specify the configuration file:
+   - By default `gatewayclient` looks for `./gatewayclient.conf` then
      `./client/gatewayclient.conf`.
-   - Chemin explicite : `gatewayclient -config /path/to/gatewayclient.conf`
+   - Explicit path: `gatewayclient -config /path/to/gatewayclient.conf`
 
-3. Exemple de session manuelle :
+3. Manual session example:
 
    ```sh
    ./gatewayclient -config gatewayclient.conf
@@ -433,22 +431,20 @@ permissions `0600`.
    quit
    ```
 
-Au démarrage, `gatewayclient` se connecte, attend `hello`, s'authentifie si
-`access_keys` est annoncé, sélectionne `engine_id`, puis ponte `stdin` →
-`{"type":"uci","command":...}` et `{"type":"uci_output","line":...}` → `stdout`.
-Aucune ligne shell n'est construite depuis le réseau ; le champ `command` est
-relayé tel quel avec un seul `LF`.
+At startup, `gatewayclient` connects, waits for `hello`, authenticates if
+`access_keys` is advertised, selects `engine_id`, then bridges `stdin` →
+`{"type":"uci","command":...}` and `{"type":"uci_output","line":...}` → `stdout`.
+No shell line is built from network data; the `command` field is forwarded
+verbatim with a single `LF`.
 
-Fermer la GUI ou envoyer `quit` coupe la connexion ; le serveur libère alors le
-processus moteur associé.
+Closing the GUI or sending `quit` closes the connection; the server then
+releases the associated engine process.
 
-### Sécurité
+### Security
 
-- Ne loguez pas les parties si `log_file` est exposé ; traitez-le comme une
-  donnée sensible.
-- Préférez `tls.enabled=true` avec un CA privé dès que le réseau n'est pas
-  local.
-- Le client ne logue jamais `access_key`.
+- Do not expose `log_file` if it may contain games; treat it as sensitive data.
+- Prefer `tls.enabled=true` with a private CA whenever the network is not local.
+- The client never logs `access_key`.
 
 ## Development
 
