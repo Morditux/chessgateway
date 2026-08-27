@@ -1,0 +1,19 @@
+{
+  "listen": "0.0.0.0:9000",
+  "max_clients": 64,
+  "max_line_bytes": 1048576,
+  "shutdown_timeout_ms": 2000,
+  "auth": {
+    "enabled": false,
+    "clients_file": "/etc/chessgateway/clients.config"
+  },
+  "engines": [
+    {
+      "id": "stockfish-17",
+      "name": "Stockfish",
+      "version": "17",
+      "command": "/engines/stockfish",
+      "args": []
+    }
+  ]
+}

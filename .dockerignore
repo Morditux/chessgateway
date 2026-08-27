@@ -1,0 +1,11 @@
+.git
+.gitignore
+main
+chessgateway
+chessgateway_*.deb
+/tmp
+engines/
+clients.config
+*.key
+*.crt
+certs/

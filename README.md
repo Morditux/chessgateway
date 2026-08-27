@@ -283,6 +283,61 @@ from `config.example.json`, never overwritten on reinstall): adjust the
 `listen` address, `max_clients` and the `engines` entries to the installed
 engine binaries. Logs and engine stderr go to the journal.
 
+## Deployment with Docker
+
+`Dockerfile` (multi-stage `golang:1.27-bookworm` → `debian:bookworm-slim`) and
+`docker-compose.yml` are provided. Engine binaries are **not baked into the
+image**: the host folder that contains them is mounted via the
+`ENGINES_HOST_DIR` environment variable. The clients access-key file also
+**stays on the host** and is never copied into the image — it is mounted
+read-only via `CLIENTS_FILE_HOST`.
+
+```sh
+cp .env.example .env
+# Edit .env:
+#   ENGINES_HOST_DIR=/home/mordicus/chess/engines  # host folder with stockfish, etc.
+#   CLIENTS_FILE_HOST=/home/mordicus/chessgateway/clients.config  # only if auth.enabled=true
+#   CHESSGATEWAY_PORT=9000
+
+# Edit config.docker.json for the container paths:
+#   "listen": "0.0.0.0:9000"
+#   "command": "/engines/stockfish"   # container path, not host path
+#   "auth": { "enabled": true, "clients_file": "/etc/chessgateway/clients.config" }
+
+# Prepare a host folder with executable engines:
+mkdir -p ./engines
+cp /usr/games/stockfish ./engines/
+chmod +x ./engines/stockfish
+
+# If authentication is enabled, prepare the keys file on the host:
+# chmod 644 clients.config  # one line per client: "<name> <uuid>"
+# # The container runs as user 999 (chessgateway), so the file must be
+# # readable inside the container. Use 644, or more restrictively:
+# #   chgrp 999 clients.config && chmod 640 clients.config
+
+docker compose up --build -d
+docker compose logs -f
+# Test:
+echo '{"type":"list_engines","request_id":"r1"}' | nc localhost 9000
+docker compose down
+```
+
+`config.docker.json` is the container configuration template (listening on
+`0.0.0.0:9000`, engines at `/engines/...`, `auth.clients_file` at
+`/etc/chessgateway/clients.config`). It is copied into the image as
+`/etc/chessgateway/config.json` and can be overridden by the volume
+`./config.docker.json:/etc/chessgateway/config.json:ro`. TLS certificates, if
+used, should be mounted similarly (e.g. `./certs:/certs:ro` and
+`tls.cert_file`/`key_file` pointing inside the container).
+
+Security notes:
+- `.dockerignore` excludes `clients.config`, `*.key`, `*.crt` and `engines/` so
+  secrets and host binaries never enter the image layers.
+- Both engine and clients mounts are `:ro`.
+- The container runs as unprivileged user `chessgateway` and respects
+  `ulimits.nofile=65536` and `stop_grace_period: 30s` (mirroring
+  `deploy/chessgateway.service`).
+
 ## Development
 
 ```sh
