@@ -245,6 +245,44 @@ leak paths or internal server details.
 - Each client consumes one engine process: size `max_clients` according to the
   available CPU/RAM and apply the appropriate system limits.
 
+## Deployment with systemd
+
+`deploy/` contains the packaging and deployment files:
+
+- `deploy/build-deb.sh` builds `chessgateway_<version>_<arch>.deb` (override
+  `VERSION`, `ARCH` and `MAINTAINER`). Installing the package creates the
+  `chessgateway` system user, installs the unit, the `sysctl` tuning and
+  **enables and starts the service automatically**:
+  ```sh
+  ./deploy/build-deb.sh
+  sudo apt-get install ./chessgateway_*.deb
+  ```
+- `deploy/install.sh` does the same from a source checkout
+  (`sudo ./deploy/install.sh --start`); `--uninstall` removes the service.
+- `deploy/chessgateway.service` runs the binary as a dedicated user, with
+  `LimitNOFILE=65536` and `Restart=on-failure`. SIGTERM triggers the server's
+  graceful shutdown, so `systemctl stop` releases the engine processes without
+  an `ExecStop`.
+- `deploy/sysctl.d/99-chessgateway.conf` tunes the kernel for many concurrent
+  connections (listen backlog, SYN queue, TIME_WAIT); it is applied on install
+  and can be re-applied with `sysctl -p /etc/sysctl.d/99-chessgateway.conf`.
+
+Once installed, manage the service with `systemctl`:
+
+```sh
+sudo systemctl enable --now chessgateway   # enable at boot and start
+sudo systemctl start chessgateway          # start
+sudo systemctl stop chessgateway           # stop (graceful, engines released)
+sudo systemctl restart chessgateway        # restart
+sudo systemctl status chessgateway         # status and recent log
+journalctl -u chessgateway -f              # follow the logs
+```
+
+The runtime configuration lives in `/etc/chessgateway/config.json` (installed
+from `config.example.json`, never overwritten on reinstall): adjust the
+`listen` address, `max_clients` and the `engines` entries to the installed
+engine binaries. Logs and engine stderr go to the journal.
+
 ## Development
 
 ```sh

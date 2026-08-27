@@ -1,0 +1,27 @@
+[Unit]
+Description=ChessGateway TCP gateway for UCI engines
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=chessgateway
+Group=chessgateway
+ExecStart=/usr/bin/chessgateway -config /etc/chessgateway/config.json
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=30
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+# SIGTERM triggers the server's graceful shutdown (connections closed, engine
+# processes stopped): no ExecStop is required. Engines are exec'd as children,
+# so SystemCallFilter and ReadWritePaths must stay open for UCI engines that
+# write files.
+Documentation=file:/etc/chessgateway/README.md
+
+[Install]
+WantedBy=multi-user.target
