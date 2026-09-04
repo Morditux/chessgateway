@@ -44,8 +44,14 @@ if [[ $MODE == uninstall ]]; then
 fi
 
 echo "building binary..."
-(cd "$REPO_DIR" && go build -o chessgateway ./cmd/chessgateway)
-install -m 0755 "$REPO_DIR/chessgateway" "$BIN_DEST"
+BUILD_DIR="$(mktemp -d)"
+trap 'rm -rf "$BUILD_DIR"' EXIT
+VERSION="$(git -C "$REPO_DIR" describe --tags --always 2>/dev/null | sed 's/^v//' || true)"
+if [[ ! "${VERSION:-}" =~ ^[0-9] ]]; then
+  VERSION="dev"
+fi
+(cd "$REPO_DIR" && CGO_ENABLED=0 go build -ldflags "-X github.com/Morditux/chessgateway.Version=$VERSION" -o "$BUILD_DIR/chessgateway" ./cmd/chessgateway)
+install -m 0755 "$BUILD_DIR/chessgateway" "$BIN_DEST"
 
 if ! getent passwd "$SERVICE_USER" >/dev/null; then
   echo "creating user $SERVICE_USER..."
@@ -57,6 +63,15 @@ if [[ ! -f "$CONFIG_DEST" ]]; then
   echo "installing default config to $CONFIG_DEST (edit it to add your engines)..."
   install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0640 \
     "$REPO_DIR/config.example.json" "$CONFIG_DEST"
+fi
+
+CLIENTS_DEST="$CONFIG_DIR/clients.config"
+if [[ ! -f "$CLIENTS_DEST" ]]; then
+  echo "installing clients key template to $CLIENTS_DEST..."
+  echo "WARNING: $CLIENTS_DEST contains only comments: add one '<name> <uuid>'"
+  echo "line per client (uuidgen) and set auth.enabled=true in $CONFIG_DEST to use it."
+  install -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0600 \
+    "$REPO_DIR/clients.config.example" "$CLIENTS_DEST"
 fi
 
 install -m 0644 "$REPO_DIR/deploy/chessgateway.service" "$SERVICE_DEST"

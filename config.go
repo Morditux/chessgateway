@@ -16,18 +16,24 @@ const (
 	defaultListenAddress   = "127.0.0.1:9000"
 	defaultMaxClients      = 64
 	defaultShutdownTimeout = 2 * time.Second
-	maxConfigBytes         = 4 << 20 // Configuration is local input, but need not be unbounded.
+	// defaultMinSelectInterval bounds how fast one connection may restart
+	// engine processes via select_engine. It stops a client from churning
+	// fork/exec in a tight loop; selecting the already-attached engine is
+	// a no-op and bypasses the cooldown.
+	defaultMinSelectInterval = 500 * time.Millisecond
+	maxConfigBytes           = 4 << 20 // Configuration is local input, but need not be unbounded.
 )
 
 // Config is the server configuration file format.
 type Config struct {
-	Listen            string         `json:"listen"`
-	MaxClients        int            `json:"max_clients"`
-	MaxLineBytes      int            `json:"max_line_bytes"`
-	ShutdownTimeoutMS int            `json:"shutdown_timeout_ms"`
-	TLS               *TLSConfig     `json:"tls,omitempty"`
-	Auth              *AuthConfig    `json:"auth,omitempty"`
-	Engines           []EngineConfig `json:"engines"`
+	Listen              string         `json:"listen"`
+	MaxClients          int            `json:"max_clients"`
+	MaxLineBytes        int            `json:"max_line_bytes"`
+	ShutdownTimeoutMS   int            `json:"shutdown_timeout_ms"`
+	MinSelectIntervalMS int            `json:"min_select_interval_ms"`
+	TLS                 *TLSConfig     `json:"tls,omitempty"`
+	Auth                *AuthConfig    `json:"auth,omitempty"`
+	Engines             []EngineConfig `json:"engines"`
 }
 
 // TLSConfig enables TLS when both files are configured. The server does not
@@ -58,10 +64,11 @@ type EngineConfig struct {
 
 func DefaultConfig() Config {
 	return Config{
-		Listen:            defaultListenAddress,
-		MaxClients:        defaultMaxClients,
-		MaxLineBytes:      defaultMaxLineBytes,
-		ShutdownTimeoutMS: int(defaultShutdownTimeout / time.Millisecond),
+		Listen:              defaultListenAddress,
+		MaxClients:          defaultMaxClients,
+		MaxLineBytes:        defaultMaxLineBytes,
+		ShutdownTimeoutMS:   int(defaultShutdownTimeout / time.Millisecond),
+		MinSelectIntervalMS: int(defaultMinSelectInterval / time.Millisecond),
 	}
 }
 
@@ -113,6 +120,9 @@ func (c Config) Validate() error {
 	}
 	if c.ShutdownTimeoutMS <= 0 || c.ShutdownTimeoutMS > 60000 {
 		return errors.New("shutdown_timeout_ms must be between 1 and 60000")
+	}
+	if c.MinSelectIntervalMS < 0 || c.MinSelectIntervalMS > 60000 {
+		return errors.New("min_select_interval_ms must be between 0 and 60000")
 	}
 
 	seen := make(map[string]struct{}, len(c.Engines))
@@ -177,6 +187,13 @@ func validateEngine(engine EngineConfig) error {
 
 func (c Config) shutdownTimeout() time.Duration {
 	return time.Duration(c.ShutdownTimeoutMS) * time.Millisecond
+}
+
+func (c Config) minSelectInterval() time.Duration {
+	if c.MinSelectIntervalMS < 0 {
+		return 0
+	}
+	return time.Duration(c.MinSelectIntervalMS) * time.Millisecond
 }
 
 func (e EngineConfig) Info() EngineInfo {

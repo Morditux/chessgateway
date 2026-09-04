@@ -15,89 +15,36 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Morditux/chessgateway/internal/protocol"
 )
 
-const ProtocolName = "chessgateway/1"
+// The wire types are aliased from internal/protocol, shared with the server
+// so the two sides cannot drift.
+type (
+	Request    = protocol.Request
+	EngineInfo = protocol.EngineInfo
+	Response   = protocol.Response
+)
 
-var errLineTooLong = errors.New("protocol line exceeds configured limit")
+const ProtocolName = protocol.ProtocolName
 
-// Request mirrors gateway protocol request.
-type Request struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id,omitempty"`
-	EngineID  string `json:"engine_id,omitempty"`
-	Command   string `json:"command,omitempty"`
-	AccessKey string `json:"access_key,omitempty"`
-}
+var errLineTooLong = protocol.ErrLineTooLong
 
-// EngineInfo mirrors gateway protocol engine info.
-type EngineInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Version string `json:"version"`
-}
-
-// Response mirrors gateway protocol response.
-type Response struct {
-	Type      string       `json:"type"`
-	Protocol  string       `json:"protocol,omitempty"`
-	RequestID string       `json:"request_id,omitempty"`
-	EngineID  string       `json:"engine_id,omitempty"`
-	Line      string       `json:"line,omitempty"`
-	Code      string       `json:"code,omitempty"`
-	Message   string       `json:"message,omitempty"`
-	Features  []string     `json:"features,omitempty"`
-	Engines   []EngineInfo `json:"engines,omitempty"`
-	Engine    *EngineInfo  `json:"engine,omitempty"`
-}
+// dialGatewayFunc dials the gateway. It is a variable (not a direct call) so
+// tests can substitute an in-memory pipe for the TCP/TLS connection.
+var dialGatewayFunc = dialGateway
 
 func readLine(reader *bufio.Reader, maxBytes int) (string, error) {
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxLineBytes
-	}
-	var line []byte
-	tooLong := false
-	for {
-		fragment, isPrefix, err := reader.ReadLine()
-		if err != nil {
-			return "", err
-		}
-		if !tooLong {
-			if len(line)+len(fragment) > maxBytes {
-				tooLong = true
-			} else {
-				line = append(line, fragment...)
-			}
-		}
-		if !isPrefix {
-			if tooLong {
-				return "", errLineTooLong
-			}
-			if len(line) > 0 && line[len(line)-1] == '\r' {
-				line = line[:len(line)-1]
-			}
-			return string(line), nil
-		}
-	}
+	return protocol.ReadLine(reader, maxBytes)
 }
 
 func writeJSON(writer io.Writer, value any) error {
-	data, err := json.Marshal(value)
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	_, err = writer.Write(data)
-	return err
+	return protocol.WriteJSON(writer, value)
 }
 
 func containsControlSeparator(value string) bool {
-	for _, r := range value {
-		if r == '\r' || r == '\n' || r == 0 {
-			return true
-		}
-	}
-	return false
+	return protocol.ContainsControlSeparator(value)
 }
 
 // Run connects to the gateway and bridges UCI stdin/stdout.
@@ -106,7 +53,7 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout io.Writer, log
 	if logger == nil {
 		logger = log.New(io.Discard, "", 0)
 	}
-	conn, err := dialGateway(cfg, logger)
+	conn, err := dialGatewayFunc(cfg, logger)
 	if err != nil {
 		return fmt.Errorf("dial gateway: %w", err)
 	}
@@ -279,6 +226,15 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout io.Writer, log
 				if fl, ok := stdout.(interface{ Flush() error }); ok {
 					_ = fl.Flush()
 				}
+			case "engine_exited":
+				// The attached engine died on its own: surface it to the GUI
+				// as an ignorable info string (like gateway errors) and keep
+				// bridging; the user re-selects via a reconnect.
+				logger.Printf("gateway engine %s exited", resp.EngineID)
+				_, _ = io.WriteString(stdout, fmt.Sprintf("info string gateway engine %s exited\n", resp.EngineID))
+				if fl, ok := stdout.(interface{ Flush() error }); ok {
+					_ = fl.Flush()
+				}
 			case "hello", "authenticated", "engines", "engine_selected", "engine_stopped":
 				logger.Printf("gateway control message: %s", line)
 			default:
@@ -332,8 +288,9 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout io.Writer, log
 				logger.Printf("stdin command contains control separator, discarded: %q", line)
 				continue
 			}
-			// Skip empty lines? Forwarding empty command would just send "\n" to engine.
-			// GUI typically does not send empty lines; ignore them to avoid spurious traffic.
+			// Empty lines are skipped locally; the gateway also rejects empty
+			// commands with invalid_uci_command. GUI typically does not send
+			// empty lines; ignore them to avoid spurious traffic.
 			if strings.TrimSpace(line) == "" {
 				continue
 			}
@@ -342,7 +299,11 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout io.Writer, log
 				errCh <- err
 				return
 			}
-			logger.Printf("uci -> gateway: %q", line)
+			if cfg.LogCommands {
+				logger.Printf("uci -> gateway: %q", line)
+			} else {
+				logger.Printf("uci command forwarded: %d bytes", len(line))
+			}
 			// If GUI sent quit, initiate graceful shutdown.
 			if strings.TrimSpace(line) == "quit" {
 				// Give gateway a moment to propagate quit and engine output.

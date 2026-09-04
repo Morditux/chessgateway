@@ -5,6 +5,7 @@
   "connect_timeout_ms": 5000,
   "max_line_bytes": 1048576,
   "log_file": "",
+  "log_commands": false,
   "tls": {
     "enabled": false,
     "ca_file": "/etc/chessgateway/ca.crt",

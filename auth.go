@@ -2,10 +2,10 @@ package gateway
 
 import (
 	"bufio"
-	"crypto/subtle"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 )
@@ -36,19 +36,31 @@ func newAccessKeyStore(entries []ClientAccess) *accessKeyStore {
 }
 
 // authenticate reports whether key is valid and returns the associated client
-// name. Every stored key is compared with crypto/subtle so that the time spent
-// does not reveal how much of a presented key matches.
+// name. Keys are canonicalized to lowercase and looked up directly: UUIDs
+// carry ~122 bits of entropy, so map-lookup timing reveals nothing
+// exploitable, unlike a byte-prefix comparison loop.
 func (s *accessKeyStore) authenticate(key string) (string, bool) {
 	if !isValidUUID(key) {
 		return "", false
 	}
-	presented := strings.ToLower(key)
-	for candidate, name := range s.keys {
-		if subtle.ConstantTimeCompare([]byte(candidate), []byte(presented)) == 1 {
-			return name, true
-		}
+	name, ok := s.keys[strings.ToLower(key)]
+	return name, ok
+}
+
+// warnClientsFilePerms reminds operators that the access-key file holds bearer
+// secrets: any group/other access bit defeats file-based protection. It only
+// warns so existing deployments keep starting.
+func warnClientsFilePerms(path string, logger *log.Logger) {
+	if logger == nil {
+		return
 	}
-	return "", false
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		logger.Printf("clients file %q is accessible beyond its owner (mode %04o); restrict it, e.g. chmod 600", path, perm)
+	}
 }
 
 // loadClientsFile parses the access-key file. Each non-empty line that is not

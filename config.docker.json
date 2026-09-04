@@ -3,6 +3,7 @@
   "max_clients": 64,
   "max_line_bytes": 1048576,
   "shutdown_timeout_ms": 2000,
+  "min_select_interval_ms": 500,
   "auth": {
     "enabled": false,
     "clients_file": "/etc/chessgateway/clients.config"

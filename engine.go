@@ -18,7 +18,7 @@ type engineProcess struct {
 	config       EngineConfig
 	maxLineBytes int
 	logger       *log.Logger
-	onOutput     func(string)
+	onOutput     func(*engineProcess, string)
 
 	mu      sync.Mutex
 	cmd     *exec.Cmd
@@ -27,8 +27,9 @@ type engineProcess struct {
 	done    chan struct{}
 }
 
-func startEngine(config EngineConfig, maxLineBytes int, logger *log.Logger, onOutput func(string)) (*engineProcess, error) {
+func startEngine(config EngineConfig, maxLineBytes int, logger *log.Logger, onOutput func(*engineProcess, string), onExit func(*engineProcess)) (*engineProcess, error) {
 	command := exec.Command(config.Command, config.Args...)
+	configureSysProcAttr(command)
 	stdout, err := command.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("create stdout pipe: %w", err)
@@ -77,7 +78,17 @@ func startEngine(config EngineConfig, maxLineBytes int, logger *log.Logger, onOu
 		if err != nil && logger != nil {
 			logger.Printf("engine %q exited: %v", config.ID, err)
 		}
+		process.mu.Lock()
+		expected := process.closing
+		process.mu.Unlock()
 		close(process.done)
+		// An engine that dies on its own (crash, OOM, external kill) must
+		// wake the client: otherwise a search hangs forever waiting for a
+		// bestmove that will never come. Expected shutdowns (stop, select,
+		// quit, disconnect) already answer synchronously and stay silent.
+		if !expected && onExit != nil {
+			onExit(process)
+		}
 	}()
 
 	return process, nil
@@ -101,7 +112,7 @@ func (p *engineProcess) readStdout(reader io.ReadCloser) {
 			return
 		}
 		if p.onOutput != nil {
-			p.onOutput(line)
+			p.onOutput(p, line)
 		}
 	}
 }
@@ -167,9 +178,9 @@ func (p *engineProcess) shutdown(timeout time.Duration) {
 	case <-done:
 		return
 	case <-timer.C:
-		if command != nil && command.Process != nil {
-			_ = command.Process.Kill()
-		}
+		// Kill the whole process group (see configureSysProcAttr): a bare
+		// Process.Kill would orphan forked engine helpers.
+		_ = killProcess(command)
 		<-done
 	}
 }
@@ -179,18 +190,20 @@ type engineSession struct {
 	maxLineBytes    int
 	shutdownTimeout time.Duration
 	onOutput        func(engineID, line string)
+	onExit          func(engineID string)
 
 	mu      sync.Mutex
 	current *engineProcess
 	engine  *EngineConfig
 }
 
-func newEngineSession(config Config, logger *log.Logger, onOutput func(engineID, line string)) *engineSession {
+func newEngineSession(config Config, logger *log.Logger, onOutput func(engineID, line string), onExit func(engineID string)) *engineSession {
 	return &engineSession{
 		logger:          logger,
 		maxLineBytes:    config.MaxLineBytes,
 		shutdownTimeout: config.shutdownTimeout(),
 		onOutput:        onOutput,
+		onExit:          onExit,
 	}
 }
 
@@ -199,13 +212,18 @@ func (s *engineSession) selectEngine(config EngineConfig) error {
 
 	var process *engineProcess
 	var err error
-	process, err = startEngine(config, s.maxLineBytes, s.logger, func(line string) {
+	// The callbacks receive the started process as a parameter instead of
+	// closing over the local below: startEngine spawns its readers before it
+	// returns, so a closure over the not-yet-assigned variable would race.
+	process, err = startEngine(config, s.maxLineBytes, s.logger, func(current *engineProcess, line string) {
 		s.mu.Lock()
-		isCurrent := s.current != nil && s.current == process
+		isCurrent := s.current != nil && s.current == current
 		s.mu.Unlock()
 		if isCurrent && s.onOutput != nil {
 			s.onOutput(config.ID, line)
 		}
+	}, func(current *engineProcess) {
+		s.handleUnexpectedExit(current, config.ID)
 	})
 	if err != nil {
 		if s.logger != nil {
@@ -235,6 +253,33 @@ func (s *engineSession) send(command string) error {
 		s.stopProcess(process)
 	}
 	return nil
+}
+
+func (s *engineSession) currentID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.engine == nil {
+		return ""
+	}
+	return s.engine.ID
+}
+
+// handleUnexpectedExit clears a process that died on its own so later
+// commands report no_engine_selected instead of writing to a dead pipe,
+// then notifies the client. The callback runs outside the session lock.
+func (s *engineSession) handleUnexpectedExit(process *engineProcess, engineID string) {
+	s.mu.Lock()
+	if s.current != process {
+		s.mu.Unlock()
+		return
+	}
+	s.current = nil
+	s.engine = nil
+	onExit := s.onExit
+	s.mu.Unlock()
+	if onExit != nil {
+		onExit(engineID)
+	}
 }
 
 func (s *engineSession) stop() string {
