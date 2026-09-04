@@ -9,24 +9,30 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/Morditux/chessgateway/internal/protocol"
 )
 
 const (
 	defaultHost             = "127.0.0.1:9000"
 	defaultConnectTimeoutMS = 5000
-	defaultMaxLineBytes     = 1 << 20 // 1 MiB, same as server.
+	defaultMaxLineBytes     = protocol.DefaultMaxLineBytes
 	maxConfigBytes          = 1 << 20
 )
 
 // Config is the gatewayclient configuration file format (JSON, stored in gatewayclient.conf).
 type Config struct {
-	Host             string     `json:"host"`
-	EngineID         string     `json:"engine_id"`
-	AccessKey        string     `json:"access_key,omitempty"`
-	ConnectTimeoutMS int        `json:"connect_timeout_ms"`
-	MaxLineBytes     int        `json:"max_line_bytes"`
-	LogFile          string     `json:"log_file,omitempty"`
-	TLS              *TLSConfig `json:"tls,omitempty"`
+	Host             string `json:"host"`
+	EngineID         string `json:"engine_id"`
+	AccessKey        string `json:"access_key,omitempty"`
+	ConnectTimeoutMS int    `json:"connect_timeout_ms"`
+	MaxLineBytes     int    `json:"max_line_bytes"`
+	LogFile          string `json:"log_file,omitempty"`
+	// LogCommands opts into logging full UCI command contents. It defaults
+	// to false because logs may otherwise retain game data (positions,
+	// searches); only command sizes are logged then.
+	LogCommands bool       `json:"log_commands,omitempty"`
+	TLS         *TLSConfig `json:"tls,omitempty"`
 }
 
 // TLSConfig optionally enables TLS for the gateway connection.

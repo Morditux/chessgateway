@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -13,7 +14,13 @@ import (
 
 func main() {
 	configPath := flag.String("config", "config.json", "path to the JSON server configuration")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("chessgateway %s\n", gateway.Version)
+		return
+	}
 
 	logger := log.New(os.Stderr, "chessgateway: ", log.LstdFlags|log.LUTC)
 	config, err := gateway.LoadConfig(*configPath)

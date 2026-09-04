@@ -19,6 +19,14 @@ cp config.example.json config.json
 # Adjust engines[0].command to your local installation.
 go build -o chessgateway ./cmd/chessgateway
 ./chessgateway -config config.json
+./chessgateway -version   # stamped release version (dev if unstamped)
+```
+
+Release builds stamp the version (also done by `deploy/install.sh`,
+`deploy/build-deb.sh` and the Docker build via `VERSION=`/`--build-arg`):
+
+```sh
+go build -ldflags "-X github.com/Morditux/chessgateway.Version=1.2.3" -o chessgateway ./cmd/chessgateway
 ```
 
 By default, it listens on `127.0.0.1:9000`. For remote deployment, explicitly
@@ -34,6 +42,7 @@ described in [Client authentication](#client-authentication).
   "max_clients": 64,
   "max_line_bytes": 1048576,
   "shutdown_timeout_ms": 2000,
+  "min_select_interval_ms": 500,
   "tls": {
     "cert_file": "/etc/chessgateway/server.crt",
     "key_file": "/etc/chessgateway/server.key"
@@ -53,6 +62,9 @@ described in [Client authentication](#client-authentication).
 `tls` is optional, but `cert_file` and `key_file` must be provided together.
 `command` and `args` are passed directly to `os/exec`; they are not executed via
 `sh -c`. The ids are the stable keys used by clients.
+`min_select_interval_ms` (default 500, `0` disables) bounds how fast one
+connection may switch engines; re-selecting the attached engine is a no-op
+and bypasses the cooldown (see [Selecting an engine](#selecting-an-engine)).
 
 ## Client authentication
 
@@ -157,6 +169,17 @@ requested engine and replies:
 Selection does not automatically run `uci`: the client keeps control of the UCI
 dialogue and must send the initialization itself.
 
+Re-selecting the engine already attached to the connection is a no-op: the
+running process (and any ongoing search) is kept, and the server answers
+`engine_selected` immediately. Switching to a *different* engine is rate
+limited by `min_select_interval_ms`: a switch sent too soon is refused with
+
+```json
+{"type":"error","request_id":"r2","code":"select_too_frequent","message":"wait before selecting another engine"}
+```
+
+Wait at least the configured interval and retry the same request.
+
 ### Forwarding a UCI command
 
 ```json
@@ -168,7 +191,9 @@ dialogue and must send the initialization itself.
 ```
 
 The `command` value is forwarded to the engine as is with a single transport
-`LF` appended. The server does not restrict UCI to a known list of commands:
+`LF` appended. Empty (or whitespace-only) commands are rejected with
+`invalid_uci_command`. The server does not restrict UCI to a known list of
+commands:
 standard commands and engine-specific extensions are therefore available,
 notably:
 
@@ -214,6 +239,22 @@ connection.
 On connection close, the server automatically stops the attached process. A new
 selection always replaces the previous process.
 
+### Engine crash
+
+If the attached engine process dies on its own (crash, OOM kill, external
+kill), the server detaches it and sends an asynchronous event so a search
+does not hang forever waiting for a `bestmove`:
+
+```json
+{"type":"engine_exited","engine_id":"stockfish-17"}
+```
+
+Like `uci_output`, this event carries no `request_id`. After it, UCI commands
+are refused with `no_engine_selected` until the client selects an engine
+again. Expected shutdowns (`stop_engine`, a new `select_engine`, the UCI
+command `quit`, connection close) never produce this event: they already have
+their synchronous answer.
+
 ### Errors
 
 Common format:
@@ -224,10 +265,10 @@ Common format:
 
 Main codes: `invalid_json`, `invalid_request`, `line_too_long`,
 `unknown_request_type`, `unknown_engine`, `engine_start_failed`,
-`no_engine_selected`, `invalid_uci_command`, `engine_command_failed`,
-`authentication_required`, `invalid_access_key`, `already_authenticated`,
-`server_busy`. Runtime error messages are deliberately generic so as not to
-leak paths or internal server details.
+`select_too_frequent`, `no_engine_selected`, `invalid_uci_command`,
+`engine_command_failed`, `authentication_required`, `invalid_access_key`,
+`already_authenticated`, `server_busy`. Runtime error messages are deliberately
+generic so as not to leak paths or internal server details.
 
 ## Security and operations
 
@@ -349,8 +390,6 @@ machine while keeping a local GUI.
 
 ```sh
 go build -o gatewayclient ./cmd/gatewayclient
-# or from the client folder:
-go build -o gatewayclient ./client/gatewayclient
 ```
 
 ### Configuration (`gatewayclient.conf`)
@@ -367,6 +406,7 @@ The binary reads `gatewayclient.conf` (JSON, same envelope as the server) — se
   "connect_timeout_ms": 5000,
   "max_line_bytes": 1048576,
   "log_file": "",
+  "log_commands": false,
   "tls": {
     "enabled": false,
     "ca_file": "/etc/chessgateway/ca.crt",
@@ -382,8 +422,10 @@ The binary reads `gatewayclient.conf` (JSON, same envelope as the server) — se
 - `engine_id` — id of an engine allowed on the server (required, see `config.json`).
 - `access_key` — authentication UUID when `auth.enabled=true` on the server.
 - `connect_timeout_ms` / `max_line_bytes` — network bounds (defaults 5s / 1 MiB).
-- `log_file` — log file (`""` → `stderr`). It contains connection events;
-  UCI commands are logged there — protect the file if it may contain game data.
+- `log_file` — log file (`""` → `stderr`). It contains connection events.
+- `log_commands` — when `true`, full UCI commands are logged for debugging
+  (default `false`: only sizes); enabling it may retain game data, so protect
+  the file accordingly.
 - `tls.enabled` — enables TLS (TLS 1.3). `ca_file` for a private CA, `cert_file`/
   `key_file` for mutual TLS, `server_name` for SNI, `insecure_skip_verify`
   for testing only.
@@ -453,6 +495,8 @@ GOCACHE=/tmp/chessgateway-gocache go test ./...
 GOCACHE=/tmp/chessgateway-gocache go test -race ./...
 go vet ./...
 ```
+
+The same steps run in CI (`.github/workflows/ci.yml`, plus a `gofmt` check).
 
 The root package contains the server and testable primitives; the binaries are in
 `cmd/chessgateway` and `cmd/gatewayclient` (`client/` holds the library and

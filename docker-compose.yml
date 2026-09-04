@@ -11,11 +11,13 @@ services:
       # La config conteneur doit pointer sur /engines/<binaire> (voir config.docker.json).
       - ${ENGINES_HOST_DIR:-./engines}:/engines:ro
       # Fichier des clés clients — reste sur l'hôte, jamais copié dans l'image
-      # (voir .dockerignore). Montage en lecture seule. Commente cette ligne
-      # si auth.enabled=false. Le chemin conteneur doit correspondre à
+      # (voir .dockerignore). Montage en lecture seule, REQUIS seulement si
+      # auth.enabled=true : sinon, commente cette ligne (Docker créerait un
+      # dossier vide ./clients.config sur l'hôte).
+      # Le chemin conteneur doit correspondre à
       # auth.clients_file (/etc/chessgateway/clients.config).
       # Le fichier hôte doit être lisible par l'UID 999 du conteneur
-      # (chmod 644 ou chgrp 999 && chmod 640).
+      # (UID fixé dans le Dockerfile : chmod 644 ou chgrp 999 && chmod 640).
       - ${CLIENTS_FILE_HOST:-./clients.config}:/etc/chessgateway/clients.config:ro
       # Config conteneur (optionnel si tu veux fournir ta propre config hôte) :
       - ./config.docker.json:/etc/chessgateway/config.json:ro

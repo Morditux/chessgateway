@@ -24,6 +24,7 @@ See `gatewayclient.conf.example` at the repository root and `client/gatewayclien
   "connect_timeout_ms": 5000,
   "max_line_bytes": 1048576,
   "log_file": "",
+  "log_commands": false,
   "tls": {
     "enabled": false,
     "ca_file": "/etc/chessgateway/ca.crt",
@@ -43,6 +44,7 @@ See `gatewayclient.conf.example` at the repository root and `client/gatewayclien
 | `connect_timeout_ms` | connect timeout (1–60000, default 5000) |
 | `max_line_bytes` | JSON/UCI line limit (1024–16MiB, default 1 MiB) |
 | `log_file` | `""` → stderr, otherwise file (0600 recommended) |
+| `log_commands` | `true` logs full UCI commands for debugging (default `false`: only sizes; enabling it may retain game data) |
 | `tls.enabled` | enable TLS 1.3 |
 | `tls.ca_file` | private CA (PEM) |
 | `tls.cert_file`/`key_file` | mutual TLS client cert (both required) |
@@ -84,7 +86,8 @@ quit
 ## Logging and security
 
 - `access_key` is never logged.
-- `log_file` may contain `position`/`go` commands → protect with `0600`.
+- UCI command contents are logged only when `log_commands: true` (debug);
+  `log_file` may then contain `position`/`go` commands → protect with `0600`.
 - TLS is recommended outside a local network; `insecure_skip_verify` only for labs.
 - On gateway errors (`no_engine_selected`, `engine_command_failed`…), the client logs and forwards `info string gateway error [...]` on stdout (without polluting the useful UCI stream).
 

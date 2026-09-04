@@ -29,7 +29,7 @@ STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "building binary (version $VERSION)..."
-(cd "$REPO_DIR" && CGO_ENABLED=0 go build -o "$STAGE/usr/bin/chessgateway" ./cmd/chessgateway)
+(cd "$REPO_DIR" && CGO_ENABLED=0 go build -ldflags "-X github.com/Morditux/chessgateway.Version=$VERSION" -o "$STAGE/usr/bin/chessgateway" ./cmd/chessgateway)
 
 install -d "$STAGE/etc/chessgateway" \
   "$STAGE/etc/sysctl.d" \

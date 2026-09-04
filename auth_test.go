@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +114,35 @@ func TestAccessKeyStore(t *testing.T) {
 	}
 	if _, ok := store.authenticate(""); ok {
 		t.Fatal("empty key accepted")
+	}
+}
+
+func TestNewServerWarnsOnPermissiveClientsFile(t *testing.T) {
+	path := writeClientsFile(t, "alice f81d4fae-7dec-11d0-a765-00a0c91e6bf6\n")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm()&0o077 == 0 {
+		t.Skip("umask strips group/other bits, warning cannot trigger here")
+	}
+	var logs bytes.Buffer
+	config := DefaultConfig()
+	config.Auth = &AuthConfig{Enabled: true, ClientsFile: path}
+	if _, err := NewServer(config, log.New(&logs, "", 0)); err != nil {
+		t.Fatalf("permissive clients file rejected: %v", err)
+	}
+	if !strings.Contains(logs.String(), "chmod 600") {
+		t.Fatalf("missing permissions warning, logs = %q", logs.String())
+	}
+
+	restricted := writeClientsFile(t, "alice f81d4fae-7dec-11d0-a765-00a0c91e6bf6\n")
+	logs.Reset()
+	config.Auth.ClientsFile = restricted
+	if _, err := NewServer(config, log.New(&logs, "", 0)); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(logs.String(), "chmod 600") {
+		t.Fatalf("unexpected permissions warning, logs = %q", logs.String())
 	}
 }
 

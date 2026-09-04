@@ -40,6 +40,7 @@ func NewServer(config Config, logger *log.Logger) (*Server, error) {
 		if err != nil {
 			return nil, err
 		}
+		warnClientsFilePerms(config.Auth.ClientsFile, logger)
 		store = newAccessKeyStore(entries)
 	}
 	return &Server{
@@ -118,7 +119,10 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 				return shutdown(nil)
 			default:
 			}
-			if temporary, ok := err.(net.Error); ok && temporary.Temporary() {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				// Transient shortage (fd pressure surfaces as timeouts on
+				// some platforms): back off briefly instead of aborting.
 				time.Sleep(50 * time.Millisecond)
 				continue
 			}
@@ -153,10 +157,22 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 type client struct {
 	connection    net.Conn
 	writeMu       sync.Mutex
+	sendQueue     chan Response
+	done          chan struct{}
+	closeOnce     sync.Once
 	session       *engineSession
 	server        *Server
 	authenticated bool
+	lastSelect    time.Time
 }
+
+// clientSendQueueSize bounds the number of asynchronous engine events
+// (uci_output, engine_exited) buffered for a slow client. Synchronous
+// responses bypass the queue and are written directly, so control frames keep
+// their delivery guarantee; the queue absorbs engine output bursts and a
+// client that never reads backpressures the engine reader once it is full,
+// until the per-write deadline drops the connection.
+const clientSendQueueSize = 256
 
 func (s *Server) handleClient(connection net.Conn) {
 	defer func() {
@@ -164,8 +180,15 @@ func (s *Server) handleClient(connection net.Conn) {
 		_ = connection.Close()
 	}()
 
-	client := &client{connection: connection, server: s}
-	client.session = newEngineSession(s.config, s.logger, client.engineOutput)
+	client := &client{
+		connection: connection,
+		server:     s,
+		sendQueue:  make(chan Response, clientSendQueueSize),
+		done:       make(chan struct{}),
+	}
+	client.session = newEngineSession(s.config, s.logger, client.engineOutput, client.engineExited)
+	go client.writeLoop()
+	defer client.closeDone()
 	// This also bounds a TLS handshake performed lazily by tls.Conn.Write.
 	_ = connection.SetDeadline(time.Now().Add(30 * time.Second))
 	features := []string{"engine_list", "engine_selection", "engine_stop", "uci_stream"}
@@ -248,7 +271,25 @@ func (c *client) handleRequest(request Request) bool {
 		if !ok {
 			return c.writeError(request.RequestID, "unknown_engine", "requested engine is not configured") == nil
 		}
-		if err := c.session.selectEngine(engine); err != nil {
+		// Selecting the already-attached engine is a no-op: it must not kill
+		// a running search, and it bypasses the restart cooldown below.
+		if c.session.currentID() == engine.ID {
+			info := engine.Info()
+			return c.write(Response{Type: "engine_selected", RequestID: request.RequestID, EngineID: engine.ID, Engine: &info}) == nil
+		}
+		// Bound how fast one connection may restart engine processes so a
+		// client cannot churn fork/exec in a tight loop. The cooldown is
+		// armed by every attempt that reaches the start stage, including a
+		// failed start (which still forked); unknown engine ids are cheap
+		// and never arm it.
+		if interval := c.server.config.minSelectInterval(); interval > 0 {
+			if since := time.Since(c.lastSelect); since < interval {
+				return c.writeError(request.RequestID, "select_too_frequent", "wait before selecting another engine") == nil
+			}
+		}
+		selectErr := c.session.selectEngine(engine)
+		c.lastSelect = time.Now()
+		if selectErr != nil {
 			return c.writeError(request.RequestID, "engine_start_failed", "selected engine could not be started") == nil
 		}
 		info := engine.Info()
@@ -298,13 +339,20 @@ func (c *client) handleUnauthenticatedRequest(request Request) bool {
 }
 
 func (c *client) engineOutput(engineID, line string) {
-	_ = c.write(Response{Type: "uci_output", EngineID: engineID, Line: line})
+	_ = c.enqueue(Response{Type: "uci_output", EngineID: engineID, Line: line})
+}
+
+func (c *client) engineExited(engineID string) {
+	_ = c.enqueue(Response{Type: "engine_exited", EngineID: engineID})
 }
 
 func (c *client) writeError(requestID, code, message string) error {
 	return c.write(Response{Type: "error", RequestID: requestID, Code: code, Message: message})
 }
 
+// write sends a synchronous response (hello, acks, errors) directly. It
+// completes before handleRequest returns, so a final error is always
+// delivered before the connection is torn down.
 func (c *client) write(response Response) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
@@ -315,4 +363,42 @@ func (c *client) write(response Response) error {
 		_ = c.connection.Close()
 	}
 	return err
+}
+
+// enqueue appends an engine event to the writer queue. It blocks while a slow
+// client drains the bounded queue and reports net.ErrClosed once the
+// connection is being torn down, so engine readers never panic on a closed
+// channel and never lose lines silently while the client is alive.
+func (c *client) enqueue(response Response) error {
+	select {
+	case c.sendQueue <- response:
+		return nil
+	case <-c.done:
+		return net.ErrClosed
+	}
+}
+
+func (c *client) closeDone() {
+	c.closeOnce.Do(func() { close(c.done) })
+}
+
+// writeLoop is the only writer of queued engine events. It shares writeMu
+// with synchronous responses so frames never interleave on the wire.
+func (c *client) writeLoop() {
+	for {
+		select {
+		case response := <-c.sendQueue:
+			c.writeMu.Lock()
+			_ = c.connection.SetWriteDeadline(time.Now().Add(30 * time.Second))
+			err := writeJSON(c.connection, response)
+			_ = c.connection.SetWriteDeadline(time.Time{})
+			c.writeMu.Unlock()
+			if err != nil {
+				_ = c.connection.Close()
+				return
+			}
+		case <-c.done:
+			return
+		}
+	}
 }
