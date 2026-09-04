@@ -10,7 +10,7 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w -X github.com/Morditux/chessgateway.Version=${VERSION}" -o /out/chessgateway ./cmd/chessgateway
 
 # Runtime: minimal Debian with glibc for dynamically linked UCI engines (e.g. Stockfish).
-FROM debian:bookworm-slim AS runtime
+FROM ubuntu:24.04 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates netcat-openbsd \
     && rm -rf /var/lib/apt/lists/* \
