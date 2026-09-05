@@ -25,7 +25,8 @@ type engineProcess struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	closing bool
-	done    chan struct{}
+
+	done     chan struct{}
 	stopping chan struct{}
 }
 
