@@ -20,11 +20,13 @@ type engineProcess struct {
 	logger       *log.Logger
 	onOutput     func(*engineProcess, string)
 
+	writeMu sync.Mutex // Serializes pipe writes without blocking lifecycle state.
 	mu      sync.Mutex
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	closing bool
 	done    chan struct{}
+	stopping chan struct{}
 }
 
 func startEngine(config EngineConfig, maxLineBytes int, logger *log.Logger, onOutput func(*engineProcess, string), onExit func(*engineProcess)) (*engineProcess, error) {
@@ -60,6 +62,7 @@ func startEngine(config EngineConfig, maxLineBytes int, logger *log.Logger, onOu
 		cmd:          command,
 		stdin:        stdin,
 		done:         make(chan struct{}),
+		stopping:     make(chan struct{}),
 	}
 
 	var readers sync.WaitGroup
@@ -142,54 +145,85 @@ func (p *engineProcess) readStderr(reader io.ReadCloser) {
 	}
 }
 
+// engineWriteTimeout bounds an unresponsive engine even while the client
+// connection remains open. Network deadlines cannot interrupt a pipe write.
+const engineWriteTimeout = 30 * time.Second
+
 func (p *engineProcess) send(command string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closing || p.stdin == nil {
+	return p.sendWithTimeout(command, engineWriteTimeout)
+}
+
+func (p *engineProcess) sendWithTimeout(command string, timeout time.Duration) error {
+	result := make(chan error, 1)
+	go func() {
+		p.writeMu.Lock()
+		defer p.writeMu.Unlock()
+		p.mu.Lock()
+		closing := p.closing
+		p.mu.Unlock()
+		if closing {
+			result <- errors.New("engine is stopping")
+			return
+		}
+		_, err := io.WriteString(p.stdin, command+"\n")
+		result <- err
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case err := <-result:
+		return err
+	case <-p.stopping:
 		return errors.New("engine is stopping")
+	case <-timer.C:
+		// An expired write must release its writer, not leave a goroutine
+		// and an engine behind. Zero grace forces immediate termination.
+		p.shutdown(0)
+		return errors.New("engine command write timed out")
 	}
-	_, err := io.WriteString(p.stdin, command+"\n")
-	return err
 }
 
 func (p *engineProcess) shutdown(timeout time.Duration) {
 	p.mu.Lock()
 	if p.closing {
-		done := p.done
 		p.mu.Unlock()
-		<-done
+		<-p.done
 		return
 	}
 	p.closing = true
-	stdin := p.stdin
-	command := p.cmd
-	done := p.done
-	if stdin != nil {
-		// stop lets a thinking engine leave its search before quit asks it to
-		// terminate. Both are standard UCI commands.
-		_, _ = io.WriteString(stdin, "stop\nquit\n")
-		_ = stdin.Close()
-	}
+	// Release output callbacks before waiting for the process/readers.
+	close(p.stopping)
 	p.mu.Unlock()
 
+	// Arm the timeout before attempting graceful writes or acquiring their
+	// lock: either can block when the engine stops reading stdin.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		p.writeMu.Lock()
+		defer p.writeMu.Unlock()
+		_, _ = io.WriteString(p.stdin, "stop\nquit\n")
+		_ = p.stdin.Close()
+	}()
 	select {
-	case <-done:
-		return
+	case <-p.done:
 	case <-timer.C:
-		// Kill the whole process group (see configureSysProcAttr): a bare
-		// Process.Kill would orphan forked engine helpers.
-		_ = killProcess(command)
-		<-done
+		_ = killProcess(p.cmd)
 	}
+	// Close also interrupts outstanding pipe writes; no lifecycle mutex is
+	// held by those writers. Join cleanup before returning.
+	_ = p.stdin.Close()
+	<-writerDone
+	<-p.done
 }
 
 type engineSession struct {
 	logger          *log.Logger
 	maxLineBytes    int
 	shutdownTimeout time.Duration
-	onOutput        func(engineID, line string)
+	onOutput        func(engineID, line string, stopping <-chan struct{})
 	onExit          func(engineID string)
 
 	mu      sync.Mutex
@@ -197,7 +231,7 @@ type engineSession struct {
 	engine  *EngineConfig
 }
 
-func newEngineSession(config Config, logger *log.Logger, onOutput func(engineID, line string), onExit func(engineID string)) *engineSession {
+func newEngineSession(config Config, logger *log.Logger, onOutput func(engineID, line string, stopping <-chan struct{}), onExit func(engineID string)) *engineSession {
 	return &engineSession{
 		logger:          logger,
 		maxLineBytes:    config.MaxLineBytes,
@@ -220,7 +254,7 @@ func (s *engineSession) selectEngine(config EngineConfig) error {
 		isCurrent := s.current != nil && s.current == current
 		s.mu.Unlock()
 		if isCurrent && s.onOutput != nil {
-			s.onOutput(config.ID, line)
+			s.onOutput(config.ID, line, current.stopping)
 		}
 	}, func(current *engineProcess) {
 		s.handleUnexpectedExit(current, config.ID)
@@ -247,6 +281,11 @@ func (s *engineSession) send(command string) error {
 		return errNoEngine
 	}
 	if err := process.send(command); err != nil {
+		select {
+		case <-process.stopping:
+			s.stopProcess(process)
+		default:
+		}
 		return err
 	}
 	if strings.TrimSpace(command) == "quit" {

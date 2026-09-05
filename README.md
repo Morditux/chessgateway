@@ -232,6 +232,13 @@ exit. It replies:
 {"type":"engine_stopped","request_id":"r4","engine_id":"stockfish-17"}
 ```
 
+The shutdown grace period also covers writes to the engine: an engine that
+no longer reads stdin is forcibly stopped when the period expires. A regular
+UCI command write has a 30-second timeout; expiration stops and detaches the
+engine and returns `engine_command_failed`. Pending output may be discarded
+when stopping an engine or closing a connection, so a slow receiver cannot
+prevent cleanup.
+
 To stop a search while keeping the selected engine, use the UCI command `stop`.
 The UCI command `quit` is also relayed and releases the engine from the
 connection.
