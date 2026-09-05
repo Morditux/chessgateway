@@ -209,7 +209,10 @@ func (s *Server) handleClient(connection net.Conn) {
 	// with authentication enabled the deadline is only lifted once the client
 	// has authenticated.
 	_ = connection.SetReadDeadline(time.Now().Add(30 * time.Second))
-	defer client.session.stop()
+	defer func() {
+		client.closeDone()
+		client.session.stop()
+	}()
 	reader := bufio.NewReaderSize(connection, 64<<10)
 	firstRequest := true
 	for {
@@ -338,8 +341,12 @@ func (c *client) handleUnauthenticatedRequest(request Request) bool {
 	return c.write(Response{Type: "authenticated", RequestID: request.RequestID}) == nil
 }
 
-func (c *client) engineOutput(engineID, line string) {
-	_ = c.enqueue(Response{Type: "uci_output", EngineID: engineID, Line: line})
+func (c *client) engineOutput(engineID, line string, stopping <-chan struct{}) {
+	select {
+	case c.sendQueue <- Response{Type: "uci_output", EngineID: engineID, Line: line}:
+	case <-stopping:
+	case <-c.done:
+	}
 }
 
 func (c *client) engineExited(engineID string) {
